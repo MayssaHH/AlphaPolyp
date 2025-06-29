@@ -77,7 +77,7 @@ def upload_file():
         flash('No selected file')
         return redirect(url_for('index'))
     
-    if file and allowed_file(file.filename):
+    if file and file.filename and allowed_file(file.filename):
         # Generate unique filename
         filename = secure_filename(file.filename)
         base_name, extension = os.path.splitext(filename)
