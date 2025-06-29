@@ -1,7 +1,8 @@
 import os
 import numpy as np
 import cv2
-from flask import Flask, request, render_template, flash, redirect, url_for, send_from_directory, jsonify
+import pickle
+from flask import Flask, request, render_template, jsonify
 from werkzeug.utils import secure_filename
 import tensorflow as tf
 from tensorflow.keras import backend as K
@@ -33,6 +34,15 @@ os.makedirs(app.config['RESULT_FOLDER'], exist_ok=True)
 
 # Global variable to store the model
 model = None
+# Global variable to store regression stats
+reg_stats = None
+
+# --- Denormalization function ---
+def denormalize_regression(prediction, reg_stats):
+    reg_min = reg_stats['min']
+    reg_max = reg_stats['max']
+    reg_range = reg_max - reg_min + 1e-8
+    return prediction * reg_range + reg_min
 
 kernel_initializer = 'he_uniform'
 interpolation = "nearest"
@@ -310,7 +320,7 @@ def pred_image(img_path, model):
     img = np.expand_dims(img, axis=0)
     
     # Get prediction using TensorFlow model
-    segmentation, _ = model.predict(img)
+    segmentation, regression = model.predict(img)
     pred = segmentation[0, :, :, 0]
     pred = (pred > 0.5).astype(np.float32)
     
@@ -359,7 +369,9 @@ def upload_file():
         if model is not None:
             segmentation, regression = model.predict(preprocessed_img)
             segmentation = segmentation[0, :, :, 0].tolist()  # Convert to list for JSON
-            volume = float(regression[0, 0])
+            regression = denormalize_regression(regression, reg_stats)
+            # Inverse log1p for volume
+            volume = float(np.expm1(regression[0, 0]))
             dimensions = [float(x) for x in regression[0, 1:4]]
             processing_time = 0  # You can add timing if you want
 
@@ -382,8 +394,12 @@ def about():
 # Load the AI model when the app starts
 try:
     load_ai_model()
+    # Load regression stats
+    with open('regression_stats.pkl', 'rb') as f:
+        reg_stats = pickle.load(f)
+    print('Loaded regression statistics for denormalization.')
 except Exception as e:
-    print(f"Error loading model: {str(e)}", flush=True)
+    print(f"Error loading model or regression stats: {str(e)}", flush=True)
     print("The application will use mock data for predictions.", flush=True)
 
 if __name__ == '__main__':

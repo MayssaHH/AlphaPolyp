@@ -67,6 +67,7 @@ seg_pred, reg_pred = model.predict(x_real, batch_size=batch_size, verbose=1)
 # Denormalize regression predictions if stats are available
 if reg_stats is not None:
     reg_pred = denormalize_regression(reg_pred, reg_stats)
+    reg_pred[0,0] = np.expm1(reg_pred[0,0])
     print("Regression predictions denormalized to original scale")
 else:
     print("Regression predictions in normalized scale")

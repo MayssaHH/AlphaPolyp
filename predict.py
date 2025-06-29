@@ -157,6 +157,7 @@ def main():
         print("Regression predictions in normalized scale")
     
     # Extract volume and dimensions
+    regression[0,0] = np.expm1(regression[0,0])
     volume = regression[0, 0]  # First value is volume
     dimensions = regression[0, 1:4]  # Next 3 values are x, y, z dimensions
     
