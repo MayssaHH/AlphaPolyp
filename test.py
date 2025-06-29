@@ -8,6 +8,7 @@ test.py  ──  Evaluate the RAPUNet+regression checkpoint on real data.
 import os, csv
 import numpy as np
 import tensorflow as tf
+import pickle
 from sklearn.metrics import (
     f1_score, jaccard_score,
     precision_score, recall_score, accuracy_score
@@ -16,9 +17,10 @@ from sklearn.metrics import (
 from ModelArchitecture.DiceLoss import dice_metric_loss
 from CustomLayers.ImageLoader2D import load_images_masks_from_drive
 
-# ── USER PATHS ───────────────────────────────────────────────────────────────
-img_size   = 500                          # must match training resolution
-model_path = 'best_model.h5'              # checkpoint to evaluate
+
+img_size   = 352                         
+model_path = 'alphapolyp_optimized_model.h5'           
+stats_path = 'regression_stats.pkl'     
 
 real_base  = '/content/drive/MyPolypData/real_eval'  # ← change to your folder
 img_dir    = os.path.join(real_base, 'images')
@@ -27,11 +29,33 @@ mask_dir   = os.path.join(real_base, 'masks')
 csv_labels = None                         # e.g. '/content/real_eval_labels.csv'
 batch_size = 4
 
-# ─────────────────────────────────────────────────────────────────────────────
+
+def load_regression_stats(stats_path):
+    """Load regression statistics for denormalization"""
+    if not os.path.exists(stats_path):
+        print(f"Warning: Regression stats not found at {stats_path}")
+        return None
+    
+    with open(stats_path, 'rb') as f:
+        reg_stats = pickle.load(f)
+    print("Loaded regression statistics for denormalization")
+    return reg_stats
+
+def denormalize_regression(prediction, reg_stats):
+    """Denormalize regression predictions using min-max scaling"""
+    reg_min = reg_stats['min']
+    reg_max = reg_stats['max']
+    reg_range = reg_max - reg_min
+    return prediction * reg_range + reg_min
+
+# Load model
 model = tf.keras.models.load_model(
     model_path,
     custom_objects={'dice_metric_loss': dice_metric_loss}
 )
+
+# Load regression statistics
+reg_stats = load_regression_stats(stats_path)
 
 # load real images & masks
 x_real, y_real = load_images_masks_from_drive(img_dir, mask_dir, img_size)
@@ -39,6 +63,13 @@ print(f'> Loaded {len(x_real)} real images for evaluation.')
 
 # predict
 seg_pred, reg_pred = model.predict(x_real, batch_size=batch_size, verbose=1)
+
+# Denormalize regression predictions if stats are available
+if reg_stats is not None:
+    reg_pred = denormalize_regression(reg_pred, reg_stats)
+    print("Regression predictions denormalized to original scale")
+else:
+    print("Regression predictions in normalized scale")
 
 # segmentation metrics
 y_true = (y_real.flatten() > 0.5)
@@ -57,7 +88,7 @@ print(f'  Precision  : {precision:.4f}')
 print(f'  Recall     : {recall:.4f}')
 print(f'  Accuracy   : {accuracy:.4f}')
 
-# optional regression metrics
+# regression metrics
 if csv_labels and os.path.exists(csv_labels):
     gt_map = {}
     with open(csv_labels) as f:
@@ -79,5 +110,13 @@ if csv_labels and os.path.exists(csv_labels):
     print('\nRegression performance:')
     print(f'  MSE (volume,x,y,z): {mse:.4f}')
     print(f'  MAE (volume,x,y,z): {mae:.4f}')
+    
+    # Individual metrics for each dimension
+    print('\nIndividual regression metrics:')
+    metrics_names = ['Volume', 'X-dim', 'Y-dim', 'Z-dim']
+    for i, name in enumerate(metrics_names):
+        mse_i = np.mean(np.square(y_reg_true[:, i] - reg_pred[:, i]))
+        mae_i = np.mean(np.abs(y_reg_true[:, i] - reg_pred[:, i]))
+        print(f'  {name}: MSE={mse_i:.4f}, MAE={mae_i:.4f}')
 else:
     print('\nNo CSV with ground-truth regression labels → skipped MSE/MAE.')
