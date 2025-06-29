@@ -1,6 +1,7 @@
 import os, csv, gc, datetime
 import numpy as np
 import albumentations as albu
+import pickle
 from sklearn.model_selection import train_test_split
 from keras.callbacks import CSVLogger, ModelCheckpoint, TensorBoard, ReduceLROnPlateau
 from tensorflow_addons.optimizers import AdamW
@@ -18,7 +19,7 @@ synth_mask_dir = os.path.join(drive_base, 'masks')
 csv_labels     = 'cleaned_labels.csv'    
 
 
-img_size       = 500
+img_size       = 352
 filters        = 17
 batch_size     = 8
 seed           = 58800
@@ -270,6 +271,10 @@ x_train, x_val, y_train_mask, y_val_mask, y_train_reg, y_val_reg = \
 print(f"Training set: {len(x_train)} samples, Validation set: {len(x_val)} samples")
 
 reg_stats = compute_regression_statistics(y_train_reg)
+
+# Save regression statistics for prediction
+pickle.dump(reg_stats, open('regression_stats.pkl', 'wb'))
+print("Saved regression statistics to regression_stats.pkl")
 
 normalized_regression_loss = create_minmax_normalized_mse_loss(reg_stats)
 
