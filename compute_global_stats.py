@@ -2,6 +2,7 @@ import os
 import numpy as np
 import pickle
 import csv
+import argparse
 
 def load_label_map(csv_file):
     """Load label map from CSV"""
@@ -106,11 +107,16 @@ def compute_global_statistics(real_img_dir, synth_img_dir, csv_labels):
 
 def main():
     """Main function to compute global statistics"""
-    # Configuration
-    drive_base = 'G:\My Drive\extracted_folder\synth-colon'
+    # Argument parsing
+    parser = argparse.ArgumentParser(description='Compute global regression statistics for AlphaPolyp dataset')
+    parser.add_argument('--root', type=str, required=True, help='Root path to data (drive_base)')
+    parser.add_argument('--csv', type=str, required=True, help='CSV file with labels')
+    args = parser.parse_args()
+
+    drive_base = args.root
     real_img_dir = os.path.join(drive_base, 'cyclegan_images')
     synth_img_dir = os.path.join(drive_base, 'images')
-    csv_labels = 'best_labels.csv'
+    csv_labels = args.csv
     
     # Validate paths
     paths_to_check = [
