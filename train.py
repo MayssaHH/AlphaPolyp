@@ -16,14 +16,13 @@ real_img_dir  = os.path.join(drive_base, 'cyclegan_images')
 real_mask_dir = os.path.join(drive_base, 'masks')
 synth_img_dir  = os.path.join(drive_base, 'images')
 synth_mask_dir = os.path.join(drive_base, 'masks')
-csv_labels     = 'cleaned_labels.csv'    
+csv_labels     = 'best_labels.csv'    
 
 
 img_size       = 352
 filters        = 17
 batch_size     = 8
 seed           = 58800
-mean = 0.0
 
 def validate_paths():
     """Validate that all required paths exist"""
@@ -56,7 +55,7 @@ def load_label_map(csv_file):
             for row in csv.DictReader(f):
                 try:
                     label_map[row['Filename']] = [
-                        float(row['Volume']),
+                        float(row['logVolume']),
                         float(row['x']),
                         float(row['y']),
                         float(row['z'])
@@ -149,11 +148,11 @@ def create_minmax_normalized_mse_loss(reg_stats):
     Create MSE loss normalized using min-max scaling from training data statistics
     """
     reg_min, reg_max = reg_stats['min'], reg_stats['max']
-    reg_range = reg_max - reg_min
-    
+    reg_range = reg_max - reg_min + 1e-8
+
     def minmax_normalized_mse_loss(y_true, y_pred):
-        y_true_norm = (y_true - reg_min) / (reg_max - reg_min + 1e-8)
-        y_pred_norm = (y_pred - reg_min) / (reg_max - reg_min + 1e-8)
+        y_true_norm = (y_true - reg_min) / reg_range
+        y_pred_norm = (y_pred - reg_min) / reg_range
         
         return tf.keras.losses.mean_squared_error(y_true_norm, y_pred_norm)
     
@@ -286,7 +285,7 @@ aug = albu.Compose([
 ])
 
 try:
-    model = create_model(out_classes=1, starting_filters=filters, reg_mean_norm=mean)
+    model = create_model(out_classes=1, starting_filters=filters, reg_mean_norm=reg_stats['mean'])
     print("Model created successfully")
 except Exception as e:
     print(f"ERROR: Failed to create model: {e}")
