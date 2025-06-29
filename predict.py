@@ -5,6 +5,7 @@ from tensorflow.keras.models import load_model
 from tensorflow_addons.optimizers import AdamW
 import cv2
 import argparse
+import pickle
 from model_architecture.model import create_model
 from model_architecture.DiceLoss import dice_metric_loss
 
@@ -34,19 +35,39 @@ def preprocess_image(image_path, img_size=352):
     
     return img
 
-def load_scaler(scaler_path='regression_scaler.npy'):
-    """Load the regression scaler parameters."""
-    if not os.path.exists(scaler_path):
-        raise FileNotFoundError(f"Scaler file not found at {scaler_path}")
+def load_regression_stats(stats_path='regression_stats.pkl'):
+    """
+    Load the regression statistics used during training.
+    These contain min, max, mean, std values for denormalization.
+    """
+    if not os.path.exists(stats_path):
+        raise FileNotFoundError(f"Regression stats file not found at {stats_path}")
     
-    scaler_params = np.load(scaler_path, allow_pickle=True).item()
-    return scaler_params
+    with open(stats_path, 'rb') as f:
+        reg_stats = pickle.load(f)
+    
+    print("Loaded regression statistics:")
+    print(f"  Volume: min={reg_stats['min'][0]:.2f}, max={reg_stats['max'][0]:.2f}")
+    print(f"  X-dim:  min={reg_stats['min'][1]:.2f}, max={reg_stats['max'][1]:.2f}")
+    print(f"  Y-dim:  min={reg_stats['min'][2]:.2f}, max={reg_stats['max'][2]:.2f}")
+    print(f"  Z-dim:  min={reg_stats['min'][3]:.2f}, max={reg_stats['max'][3]:.2f}")
+    
+    return reg_stats
 
-def denormalize_regression(prediction, scaler_params):
-    """Denormalize regression predictions using the saved scaler parameters."""
-    mean = scaler_params['mean']
-    scale = scaler_params['scale']
-    return prediction * scale + mean
+def denormalize_regression(prediction, reg_stats):
+    """
+    Denormalize regression predictions using min-max scaling.
+    This reverses the normalization used during training.
+    """
+    reg_min = reg_stats['min']
+    reg_max = reg_stats['max']
+    reg_range = reg_max - reg_min
+    
+    # Reverse the min-max normalization: y_norm = (y - min) / (max - min)
+    # So: y = y_norm * (max - min) + min
+    denormalized = prediction * reg_range + reg_min
+    
+    return denormalized
 
 def get_subject_name(image_path):
     """Extract subject name from image path."""
@@ -86,49 +107,58 @@ def main():
     parser.add_argument('--image', type=str, required=True, help='Path to input image')
     parser.add_argument('--model', type=str, default='alphapolyp_optimized_model.h5', 
                         help='Path to trained model')
+    parser.add_argument('--stats', type=str, default='regression_stats.pkl',
+                        help='Path to regression statistics file')
     args = parser.parse_args()
     
     ensure_predictions_dir()
 
     subject_name = get_subject_name(args.image)
-    
     output_filename = f"{subject_name}_pred.jpg"
     output_path = os.path.join(PREDICTIONS_DIR, output_filename)
     
-    
+    # Custom objects for model loading
     custom_objects = {
         'AdamW': AdamW,
         'dice_metric_loss': dice_metric_loss
     }
     
+    # Load model
     if not os.path.exists(args.model):
         print(f"Model file {args.model} not found. Creating new model...")
-        model = create_model(352, 352, 3, 1, 17)
+        model = create_model(out_classes=1, starting_filters=17)
     else:
         print(f"Loading model from {args.model}")
         with tf.keras.utils.custom_object_scope(custom_objects):
             model = load_model(args.model)
     
     try:
-        scaler_params = load_scaler()
-        print("Loaded regression scaler parameters")
+        reg_stats = load_regression_stats(args.stats)
+        print("Successfully loaded regression statistics for denormalization")
     except FileNotFoundError:
-        print("Warning: Regression scaler not found. Predictions will be in normalized form.")
-        scaler_params = None
+        print(f"Warning: Regression stats file not found at {args.stats}")
+        print("Predictions will be in normalized form (not denormalized)")
+        reg_stats = None
     
     print(f"Processing image: {args.image}")
-    img = preprocess_image(args.image)
+    img = preprocess_image(args.image, img_size=352)
     
     print("Running prediction...")
-    segmentation, regression = model.predict(img)
+    segmentation, regression = model.predict(img, verbose=0)
     
-    segmentation = segmentation[0, :, :, 0]  
-   
-    if scaler_params is not None:
-        regression = denormalize_regression(regression, scaler_params)
+    # Extract results
+    segmentation = segmentation[0, :, :, 0]  # Remove batch and channel dimensions
     
-    volume = regression[0, 0]  
-    dimensions = regression[0, 1:4]  
+    # Denormalize regression if stats are available
+    if reg_stats is not None:
+        regression = denormalize_regression(regression, reg_stats)
+        print("Regression predictions denormalized to original scale")
+    else:
+        print("Regression predictions in normalized scale")
+    
+    # Extract volume and dimensions
+    volume = regression[0, 0]  # First value is volume
+    dimensions = regression[0, 1:4]  # Next 3 values are x, y, z dimensions
     
     original_img = cv2.imread(args.image)
     original_img = cv2.resize(original_img, (352, 352))
@@ -140,6 +170,10 @@ def main():
     print(f"Subject: {subject_name}")
     print(f"Predicted Volume: {volume:.2f}")
     print(f"Predicted Dimensions (x,y,z): {dimensions[0]:.2f}, {dimensions[1]:.2f}, {dimensions[2]:.2f}")
+    
+    # Print segmentation confidence
+    seg_confidence = np.mean(segmentation)
+    print(f"Segmentation confidence: {seg_confidence:.3f}")
 
 if __name__ == "__main__":
     main() 
