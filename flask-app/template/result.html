@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AlphaPolyp - Results</title>
+    <link rel="icon" type="image/png" href="{{ url_for('static', filename='images/logo.png') }}">
+    <style>
+        :root {
+            --primary-color: #C35143;
+            --primary-hover: #A84236;
+            --background-color: #0f1525;
+            --dark-blue: #1a2335;
+            --darker-blue: #12192a;
+            --text-color: #ffffff;
+            --text-secondary: #8892a8;
+            --card-background: #1e293b;
+            --border-color: #2a3a55;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, "Open Sans", "Helvetica Neue", sans-serif;
+        }
+
+        body {
+            background-color: var(--background-color);
+            color: var(--text-color);
+            line-height: 1.6;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 40px;
+        }
+
+        .results-section {
+            padding: 40px 0;
+        }
+
+        .results-card {
+            background-color: var(--card-background);
+            border-radius: 12px;
+            overflow: hidden;
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 30px;
+        }
+
+        .results-header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .results-header h2 {
+            font-size: 24px;
+            margin-bottom: 10px;
+        }
+
+        .results-content {
+            margin-bottom: 30px;
+        }
+
+        .result-image {
+            width: 100%;
+            border-radius: 8px;
+            overflow: hidden;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        .result-image img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        .metrics {
+            background-color: var(--dark-blue);
+            padding: 20px;
+            border-radius: 8px;
+            margin-top: 20px;
+        }
+
+        .metric-item {
+            margin-bottom: 15px;
+        }
+
+        .metric-label {
+            color: var(--text-secondary);
+            font-size: 14px;
+            margin-bottom: 5px;
+        }
+
+        .metric-value {
+            font-size: 18px;
+            font-weight: 500;
+        }
+
+        .action-buttons {
+            display: flex;
+            gap: 15px;
+            justify-content: center;
+            margin-top: 30px;
+        }
+
+        .btn {
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background-color 0.3s;
+            border: none;
+        }
+
+        .btn-primary {
+            background-color: var(--primary-color);
+            color: white;
+            text-decoration: none;
+        }
+
+        .btn-primary:hover {
+            background-color: var(--primary-hover);
+        }
+
+        .btn-secondary {
+            background-color: var(--dark-blue);
+            color: white;
+        }
+
+        .btn-secondary:hover {
+            background-color: var(--darker-blue);
+        }
+
+        .processing-time {
+            text-align: center;
+            color: var(--text-secondary);
+            font-size: 14px;
+            margin-top: 15px;
+        }
+
+        .error-message {
+            background-color: rgba(220, 38, 38, 0.1);
+            border: 1px solid rgba(220, 38, 38, 0.2);
+            color: #ef4444;
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+            margin: 20px 0;
+        }
+
+        .error-message p {
+            margin: 5px 0;
+        }
+
+        /* Loading Animation */
+        .loading-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: var(--background-color);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+
+        .colon-loader {
+            width: 120px;
+            height: 120px;
+            position: relative;
+            margin-bottom: 20px;
+        }
+
+        .colon-loader::before,
+        .colon-loader::after {
+            content: '';
+            position: absolute;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background-color: var(--primary-color);
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+
+        .colon-loader::before {
+            top: 0;
+            left: 50%;
+            transform: translateX(-50%);
+            animation-delay: 0s;
+        }
+
+        .colon-loader::after {
+            bottom: 0;
+            left: 50%;
+            transform: translateX(-50%);
+            animation-delay: 0.75s;
+        }
+
+        @keyframes pulse {
+            0%, 100% {
+                transform: translateX(-50%) scale(1);
+                opacity: 1;
+            }
+            50% {
+                transform: translateX(-50%) scale(1.2);
+                opacity: 0.5;
+            }
+        }
+
+        .loading-text {
+            color: var(--text-color);
+            font-size: 1.2rem;
+            text-align: center;
+        }
+
+        .loading-subtext {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+            margin-top: 0.5rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="loading-container" id="loadingScreen" style="display: none;">
+        <div class="colon-loader"></div>
+        <div class="loading-text">Processing your image</div>
+        <div class="loading-subtext">This may take a few seconds...</div>
+    </div>
+
+    <section class="results-section">
+        <div class="container">
+            <div class="results-card">
+                <div class="results-header">
+                    <h2>Analysis Results</h2>
+                    <p>Here are the results of your polyp analysis</p>
+                </div>
+                
+                <div class="results-content">
+                    <div class="result-image">
+                        <img src="{{ result_image }}" alt="Analysis Result">
+                    </div>
+                </div>
+
+                {% if has_polyp %}
+                <div class="metrics">
+                    <div class="metric-item">
+                        <div class="metric-label">Volume</div>
+                        <div class="metric-value">{{ "%.2f"|format(volume) }} mm³</div>
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-label">Dimensions (x, y, z)</div>
+                        <div class="metric-value">
+                            {{ "%.2f"|format(dimensions[0]) }} × {{ "%.2f"|format(dimensions[1]) }} × {{ "%.2f"|format(dimensions[2]) }} mm
+                        </div>
+                    </div>
+                </div>
+                {% else %}
+                <div class="error-message">
+                    <p>No polyp was detected in the uploaded image.</p>
+                    <p>Please try again with a different image.</p>
+                </div>
+                {% endif %}
+
+                <div class="action-buttons">
+                    <a href="{{ url_for('index') }}" class="btn btn-primary">Analyze Another Image</a>
+                    <button onclick="window.print()" class="btn btn-secondary">Save Results</button>
+                </div>
+
+                <div class="processing-time">
+                    Processing time: {{ "%.1f"|format(processing_time) }} seconds
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <script>
+        // Show loading screen immediately when the page starts loading
+        document.getElementById('loadingScreen').style.display = 'flex';
+
+        // Hide loading screen when all content is loaded
+        window.addEventListener('DOMContentLoaded', function() {
+            document.getElementById('loadingScreen').style.display = 'none';
+        });
+
+        // Also add event listener for form submission to show loading screen
+        document.addEventListener('DOMContentLoaded', function() {
+            const form = document.querySelector('form');
+            if (form) {
+                form.addEventListener('submit', function() {
+                    document.getElementById('loadingScreen').style.display = 'flex';
+                });
+            }
+        });
+    </script>
+</body>
+</html>
