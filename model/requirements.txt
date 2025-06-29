@@ -4,6 +4,8 @@ opencv-python>=4.5.0
 tensorflow==2.12.0
 tensorflow-addons==0.22.0
 gunicorn==20.1.0
-
 keras 
 keras-cv-attention-models
+albumentations>=1.3.0
+scikit-learn>=1.0.0
+tqdm>=4.64.0
