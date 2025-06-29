@@ -281,7 +281,7 @@ aug = albu.Compose([
 ])
 
 try:
-    model = create_model(out_classes=3, starting_filters=filters, reg_mean_norm=mean)
+    model = create_model(out_classes=1, starting_filters=filters, reg_mean_norm=mean)
     print("Model created successfully")
 except Exception as e:
     print(f"ERROR: Failed to create model: {e}")
