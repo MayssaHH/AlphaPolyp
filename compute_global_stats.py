@@ -37,8 +37,9 @@ def filter_labeled(img_dir, label_map):
     for fn in os.listdir(img_dir):
         if not fn.lower().endswith(('.jpg','.png','.jpeg')): 
             continue
-        base = os.path.splitext(fn)[0]             
-        key = f"{base}_labeled.obj"              
+        base = os.path.splitext(fn)[0]
+        base_no_zeros = base.lstrip('0')  # Remove leading zeros
+        key = f"{base_no_zeros}_labeled.obj"
         if key in label_map:
             out.append(fn)
     return sorted(out)
