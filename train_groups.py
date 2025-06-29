@@ -6,18 +6,25 @@ from sklearn.model_selection import train_test_split
 from keras.callbacks import CSVLogger, ModelCheckpoint, TensorBoard, ReduceLROnPlateau
 from tensorflow_addons.optimizers import AdamW
 import tensorflow as tf
+import argparse
 
 from model_architecture.DiceLoss import dice_metric_loss
 from model_architecture.model import create_model
 from model_architecture.DataGenerator import LargeDatasetGenerator, create_minmax_normalized_mse_loss
 
+# Argument parsing
+parser = argparse.ArgumentParser(description='Train AlphaPolyp model on large dataset (groups)')
+parser.add_argument('--root', type=str, required=True, help='Root path to data (drive_base)')
+parser.add_argument('--csv', type=str, required=True, help='CSV file with labels')
+args = parser.parse_args()
+
 # Configuration
-drive_base = 'G:\My Drive\extracted_folder\synth-colon'
+drive_base = args.root
 real_img_dir = os.path.join(drive_base, 'cyclegan_images')
 real_mask_dir = os.path.join(drive_base, 'masks')
 synth_img_dir = os.path.join(drive_base, 'images')
 synth_mask_dir = os.path.join(drive_base, 'masks')
-csv_labels = 'best_labels.csv'
+csv_labels = args.csv
 
 img_size = 352
 filters = 17

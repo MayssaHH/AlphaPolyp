@@ -13,20 +13,28 @@ from sklearn.metrics import (
     f1_score, jaccard_score,
     precision_score, recall_score, accuracy_score
 )
+import argparse
 
-from ModelArchitecture.DiceLoss import dice_metric_loss
-from CustomLayers.ImageLoader2D import load_images_masks_from_drive
+from model_architecture.DiceLoss import dice_metric_loss
+from model_architecture.ImageLoader2D import load_images_masks_from_drive
 
 
-img_size   = 352                         
-model_path = 'alphapolyp_optimized_model.h5'           
+img_size   = 352          
 stats_path = 'regression_stats.pkl'     
 
-real_base  = '/content/drive/MyPolypData/real_eval'  # ← change to your folder
-img_dir    = os.path.join(real_base, 'images')
-mask_dir   = os.path.join(real_base, 'masks')
+# Argument parsing
+parser = argparse.ArgumentParser(description='Evaluate RAPUNet+regression checkpoint on real data.')
+parser.add_argument('--model_path', type=str, required=True, help='Path to trained model file (.h5)')
+parser.add_argument('--data_path', type=str, required=True, help='Root path to data directory containing images/ and masks/')
+parser.add_argument('--csv', type=str, default=None, help='CSV file with ground-truth regression labels (optional)')
+args = parser.parse_args()
 
-csv_labels = None                         # e.g. '/content/real_eval_labels.csv'
+model_path = args.model_path
+real_base = args.data_path
+img_dir = os.path.join(real_base, 'images')
+mask_dir = os.path.join(real_base, 'masks')
+csv_labels = args.csv
+
 batch_size = 4
 
 
