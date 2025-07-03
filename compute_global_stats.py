@@ -94,11 +94,15 @@ def compute_global_statistics(real_img_dir, synth_img_dir, csv_labels):
             'range': np.max(all_regs, axis=0) - np.min(all_regs, axis=0)
         }
         
-        print("\nGlobal regression statistics:")
-        print(f"  Volume: min={stats['min'][0]:.2f}, max={stats['max'][0]:.2f}, mean={stats['mean'][0]:.2f}")
-        print(f"  X-dim:  min={stats['min'][1]:.2f}, max={stats['max'][1]:.2f}, mean={stats['mean'][1]:.2f}")
-        print(f"  Y-dim:  min={stats['min'][2]:.2f}, max={stats['max'][2]:.2f}, mean={stats['mean'][2]:.2f}")
-        print(f"  Z-dim:  min={stats['min'][3]:.2f}, max={stats['max'][3]:.2f}, mean={stats['mean'][3]:.2f}")
+        # Check that stats arrays are not empty before printing
+        if (len(stats['min']) == 0 or len(stats['max']) == 0 or len(stats['mean']) == 0):
+            print("No statistics available to display (empty data).")
+        else:
+            print("\nGlobal regression statistics:")
+            print(f"  Volume: min={stats['min'][0]:.2f}, max={stats['max'][0]:.2f}, mean={stats['mean'][0]:.2f}")
+            print(f"  X-dim:  min={stats['min'][1]:.2f}, max={stats['max'][1]:.2f}, mean={stats['mean'][1]:.2f}")
+            print(f"  Y-dim:  min={stats['min'][2]:.2f}, max={stats['max'][2]:.2f}, mean={stats['mean'][2]:.2f}")
+            print(f"  Z-dim:  min={stats['min'][3]:.2f}, max={stats['max'][3]:.2f}, mean={stats['mean'][3]:.2f}")
         
         return stats
     else:
@@ -151,10 +155,13 @@ def main():
         with open(txt_file, 'w') as f:
             f.write("Global Regression Statistics\n")
             f.write("===========================\n\n")
-            f.write(f"Volume: min={stats['min'][0]:.6f}, max={stats['max'][0]:.6f}, mean={stats['mean'][0]:.6f}, std={stats['std'][0]:.6f}\n")
-            f.write(f"X-dim:  min={stats['min'][1]:.6f}, max={stats['max'][1]:.6f}, mean={stats['mean'][1]:.6f}, std={stats['std'][1]:.6f}\n")
-            f.write(f"Y-dim:  min={stats['min'][2]:.6f}, max={stats['max'][2]:.6f}, mean={stats['mean'][2]:.6f}, std={stats['std'][2]:.6f}\n")
-            f.write(f"Z-dim:  min={stats['min'][3]:.6f}, max={stats['max'][3]:.6f}, mean={stats['mean'][3]:.6f}, std={stats['std'][3]:.6f}\n")
+            if (len(stats['min']) == 0 or len(stats['max']) == 0 or len(stats['mean']) == 0 or len(stats['std']) == 0):
+                f.write("No statistics available to display (empty data).\n")
+            else:
+                f.write(f"Volume: min={stats['min'][0]:.6f}, max={stats['max'][0]:.6f}, mean={stats['mean'][0]:.6f}, std={stats['std'][0]:.6f}\n")
+                f.write(f"X-dim:  min={stats['min'][1]:.6f}, max={stats['max'][1]:.6f}, mean={stats['mean'][1]:.6f}, std={stats['std'][1]:.6f}\n")
+                f.write(f"Y-dim:  min={stats['min'][2]:.6f}, max={stats['max'][2]:.6f}, mean={stats['mean'][2]:.6f}, std={stats['std'][2]:.6f}\n")
+                f.write(f"Z-dim:  min={stats['min'][3]:.6f}, max={stats['max'][3]:.6f}, mean={stats['mean'][3]:.6f}, std={stats['std'][3]:.6f}\n")
         
         print(f"Saved statistics summary to {txt_file}")
     else:
