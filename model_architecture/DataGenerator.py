@@ -77,11 +77,13 @@ class LargeDatasetGenerator:
         for fn in os.listdir(img_dir):
             if not fn.lower().endswith(('.jpg','.png','.jpeg')): 
                 continue
-            base = os.path.splitext(fn)[0]             
-            key = f"{base}_labeled.obj"              
-            if self.label_map is not None and key in self.label_map:
+            base = os.path.splitext(fn)[0]
+            base_no_zeros = base.lstrip('0')  # Remove leading zeros
+            if base_no_zeros in self.label_map:
                 out.append(fn)
         return sorted(out)
+
+        
     
     def _get_reg_labels(self, file_list):
         """Return regression labels for file list"""
