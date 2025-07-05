@@ -61,11 +61,9 @@ def compute_global_statistics(real_img_dir, synth_img_dir, csv_labels):
     label_map = load_label_map(csv_labels)
     if label_map is None:
         return None
-    
     # Get file lists
     real_files = filter_labeled(real_img_dir, label_map)
     synth_files = filter_labeled(synth_img_dir, label_map)
-    
     if not real_files or not synth_files:
         print("ERROR: No labeled files found")
         return None
@@ -77,6 +75,7 @@ def compute_global_statistics(real_img_dir, synth_img_dir, csv_labels):
     
     print("Processing real files...")
     real_regs = get_reg_labels(real_files, label_map)
+    print(real_regs)
     all_regs.append(real_regs)
     
     print("Processing synthetic files...")
