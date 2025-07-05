@@ -28,7 +28,7 @@ synth_mask_dir = os.path.join(drive_base, 'masks')
 csv_labels = args.csv
 stats_path = args.stats
 
-img_size = 384
+img_size = 352
 filters = 17
 batch_size = 8
 group_size = 40  # Number of images per group
