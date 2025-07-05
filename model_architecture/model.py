@@ -17,7 +17,7 @@ def create_model(img_height, img_width, input_channels, out_classes, starting_fi
     
     input_layer = backbone.input
     print('Starting RAPUNet')
-
+    print(input_layer)
     p1 = Conv2D(starting_filters * 2, 3, strides=2, padding='same')(input_layer)  
   
     #from metaformer
