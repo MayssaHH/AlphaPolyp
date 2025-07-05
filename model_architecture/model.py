@@ -16,6 +16,7 @@ def create_model(img_height, img_width, input_channels, out_classes, starting_fi
     layers =[backbone.get_layer(x).output for x in layer_names]
     
     input_layer = backbone.input
+    print(input_layer)
     print('Starting RAPUNet')
     print(input_layer)
     p1 = Conv2D(starting_filters * 2, 3, strides=2, padding='same')(input_layer)  
