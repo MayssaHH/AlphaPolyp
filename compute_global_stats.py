@@ -47,10 +47,10 @@ def get_reg_labels(file_list, label_map):
     """Return regression labels for file list"""
     regs = []
     for fname in file_list:
-        base = os.path.splitext(fname)[0]        
-        csv_key = f"{base}_labeled.obj"             
-        if csv_key in label_map:
-            regs.append(label_map[csv_key])
+        base = os.path.splitext(fname)[0]
+        base_no_zeros = base.lstrip('0')  # Remove leading zeros
+        if base_no_zeros in label_map:
+            regs.append(label_map[base_no_zeros])
     return np.array(regs, dtype=np.float32)
 
 def compute_global_statistics(real_img_dir, synth_img_dir, csv_labels):
