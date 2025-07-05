@@ -82,7 +82,7 @@ def compute_global_statistics(real_img_dir, synth_img_dir, csv_labels):
     print("Processing synthetic files...")
     synth_regs = get_reg_labels(synth_files, label_map)
     all_regs.append(synth_regs)
-    
+    print(all_regs)
     # Combine and compute statistics
     if all_regs:
         all_regs = np.vstack(all_regs)
