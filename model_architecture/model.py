@@ -25,7 +25,7 @@ def create_model(img_height, img_width, input_channels, out_classes, starting_fi
     print('Starting RAPUNet')
     print(input_layer)
     p1 = Conv2D(starting_filters * 2, 3, strides=2, padding='same')(input_layer)  
-  
+    print("output shape of p1", p1.shape)
     #from metaformer
     p2 = Conv2D(starting_filters*4,1,padding='same')(layers[3]) 
     p3 = Conv2D(starting_filters*8,1,padding='same')(layers[2]) 
