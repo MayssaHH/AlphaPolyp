@@ -14,6 +14,11 @@ def create_model(img_height, img_width, input_channels, out_classes, starting_fi
     backbone = caformer.CAFormerS18(input_shape=(352, 352, 3), pretrained="imagenet", num_classes = 0)
     layer_names = ['stack4_block3_mlp_Dense_1', 'stack3_block9_mlp_Dense_1', 'stack2_block3_mlp_Dense_1', 'stack1_block3_mlp_Dense_1']
     layers =[backbone.get_layer(x).output for x in layer_names]
+
+    for l in backbone.layers:
+        if hasattr(l, "output_shape") and len(l.output_shape) == 4:
+            print(f"{l.name:40s}  {l.output_shape}")
+
     
     input_layer = backbone.input
     print(input_layer)
