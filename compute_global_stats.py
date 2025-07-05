@@ -69,20 +69,16 @@ def compute_global_statistics(real_img_dir, synth_img_dir, csv_labels):
         return None
     
     print(f"Found {len(real_files)} real files and {len(synth_files)} synthetic files")
-    print(real_files)
-    print(synth_files)
     # Collect all regression labels
     all_regs = []
     
     print("Processing real files...")
     real_regs = get_reg_labels(real_files, label_map)
-    print(real_regs)
     all_regs.append(real_regs)
     
     print("Processing synthetic files...")
     synth_regs = get_reg_labels(synth_files, label_map)
     all_regs.append(synth_regs)
-    print(all_regs)
     # Combine and compute statistics
     if all_regs:
         all_regs = np.vstack(all_regs)
