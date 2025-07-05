@@ -10,7 +10,7 @@ kernel_initializer = 'he_uniform'
 interpolation = "nearest"
 
 
-def create_model(out_classes, starting_filters, reg_mean_norm=None):
+def create_model(img_height, img_width, input_channels, out_classes, starting_filters, reg_mean_norm=None):
     backbone = caformer.CAFormerS18(input_shape=(352, 352, 3), pretrained="imagenet", num_classes = 0)
     layer_names = ['stack4_block3_mlp_Dense_1', 'stack3_block9_mlp_Dense_1', 'stack2_block3_mlp_Dense_1', 'stack1_block3_mlp_Dense_1']
     layers =[backbone.get_layer(x).output for x in layer_names]
