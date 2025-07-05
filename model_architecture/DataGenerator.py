@@ -89,10 +89,10 @@ class LargeDatasetGenerator:
         """Return regression labels for file list"""
         regs = []
         for fname in file_list:
-            base = os.path.splitext(fname)[0]        
-            csv_key = f"{base}_labeled.obj"             
-            if self.label_map is not None and csv_key in self.label_map:
-                regs.append(self.label_map[csv_key])
+            base = os.path.splitext(fname)[0]
+            base_no_zeros = base.lstrip('0')  # Remove leading zeros
+            if self.label_map is not None and base_no_zeros in self.label_map:
+                regs.append(self.label_map[base_no_zeros])
         return np.array(regs, dtype=np.float32)
     
     def _create_groups(self):
