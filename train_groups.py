@@ -16,6 +16,7 @@ from model_architecture.DataGenerator import LargeDatasetGenerator, create_minma
 parser = argparse.ArgumentParser(description='Train AlphaPolyp model on large dataset (groups)')
 parser.add_argument('--root', type=str, required=True, help='Root path to data (drive_base)')
 parser.add_argument('--csv', type=str, required=True, help='CSV file with labels')
+parser.add_argument('--stats', type=str, required=True, help='Path to global regression stats')
 args = parser.parse_args()
 
 # Configuration
@@ -25,11 +26,12 @@ real_mask_dir = os.path.join(drive_base, 'masks')
 synth_img_dir = os.path.join(drive_base, 'images')
 synth_mask_dir = os.path.join(drive_base, 'masks')
 csv_labels = args.csv
+stats_path = args.stats
 
 img_size = 352
 filters = 17
 batch_size = 8
-group_size = 2500  # Number of images per group
+group_size = 40  # Number of images per group
 seed = 58800
 
 # Training phases
@@ -51,7 +53,7 @@ def validate_paths():
         (synth_img_dir, "Synthetic images directory"),
         (synth_mask_dir, "Synthetic masks directory"),
         (csv_labels, "CSV labels file"),
-        ('global_regression_stats.pkl', "Global regression stats file")
+        (stats_path, "Global regression stats file")
     ]
     
     missing_paths = []
@@ -161,9 +163,9 @@ def main():
         exit(1)
     
     # Load global regression statistics
-    with open('global_regression_stats.pkl', 'rb') as f:
+    with open(stats_path, 'rb') as f:
         global_reg_stats = pickle.load(f)
-    print("Loaded global regression statistics from global_regression_stats.pkl")
+    print(f"Loaded global regression statistics from {stats_path}")
     
     # Initialize data generator
     try:
