@@ -69,7 +69,8 @@ def compute_global_statistics(real_img_dir, synth_img_dir, csv_labels):
         return None
     
     print(f"Found {len(real_files)} real files and {len(synth_files)} synthetic files")
-    
+    print(real_files)
+    print(synth_files)
     # Collect all regression labels
     all_regs = []
     
