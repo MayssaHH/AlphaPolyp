@@ -188,8 +188,7 @@ def main():
     
     # Create model
     try:
-        model = create_model(img_height=img_size, img_width=img_size, input_channels=3, out_classes=1, starting_filters=filters, 
-                           reg_mean_norm=global_reg_stats['mean'])
+        model = create_model(img_height=img_size, img_width=img_size, input_channels=3, out_classes=1, starting_filters=filters, reg_mean_norm=global_reg_stats['mean'])
         print("Model created successfully")
     except Exception as e:
         print(f"ERROR: Failed to create model: {e}")
