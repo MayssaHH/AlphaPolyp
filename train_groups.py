@@ -1,8 +1,7 @@
-import os, csv, gc, datetime
+import os, gc, datetime
 import numpy as np
 import albumentations as albu
 import pickle
-from sklearn.model_selection import train_test_split
 from keras.callbacks import CSVLogger, ModelCheckpoint, TensorBoard, ReduceLROnPlateau
 from tensorflow_addons.optimizers import AdamW
 import tensorflow as tf
@@ -12,14 +11,13 @@ from model_architecture.DiceLoss import dice_metric_loss
 from model_architecture.model import create_model
 from model_architecture.DataGenerator import LargeDatasetGenerator, create_minmax_normalized_mse_loss
 
-# Argument parsing
-parser = argparse.ArgumentParser(description='Train AlphaPolyp model on large dataset (groups)')
-parser.add_argument('--root', type=str, required=True, help='Root path to data (drive_base)')
-parser.add_argument('--csv', type=str, required=True, help='CSV file with labels')
+
+parser = argparse.ArgumentParser(description='Train AlphaPolyp model per group')
+parser.add_argument('--root', type=str, required=True, help='Root path to data')
+parser.add_argument('--csv', type=str, required=True, help='CSV file for labels')
 parser.add_argument('--stats', type=str, required=True, help='Path to global regression stats')
 args = parser.parse_args()
 
-# Configuration
 drive_base = args.root
 real_img_dir = os.path.join(drive_base, 'cyclegan_images')
 real_mask_dir = os.path.join(drive_base, 'masks')
@@ -41,7 +39,6 @@ epochs_phase2 = 15  # Fine-tune all layers
 # Pretrained checkpoint
 pretrained_ckpt = 'rapunet_pretrained.h5'
 
-# Logging
 log_root = './logs'
 os.makedirs(log_root, exist_ok=True)
 
@@ -158,16 +155,13 @@ def main():
     """Main training function"""
     print("=== AlphaPolyp Large Dataset Training ===")
     
-    # Validate paths
     if not validate_paths():
         exit(1)
     
-    # Load global regression statistics
     with open(stats_path, 'rb') as f:
         global_reg_stats = pickle.load(f)
     print(f"Loaded global regression statistics from {stats_path}")
     
-    # Initialize data generator
     try:
         print("Initializing data generator...")
         data_generator = LargeDatasetGenerator(
@@ -186,7 +180,6 @@ def main():
         print(f"ERROR: Failed to initialize data generator: {e}")
         exit(1)
     
-    # Create model
     try:
         model = create_model(img_height=img_size, img_width=img_size, input_channels=3, out_classes=1, starting_filters=filters, reg_mean_norm=global_reg_stats['mean'])
         print("Model created successfully")
@@ -194,7 +187,6 @@ def main():
         print(f"ERROR: Failed to create model: {e}")
         exit(1)
     
-    # Load pretrained weights if available
     if os.path.exists(pretrained_ckpt):
         try:
             model.load_weights(pretrained_ckpt, by_name=True, skip_mismatch=True)
@@ -202,10 +194,8 @@ def main():
         except Exception as e:
             print(f"Warning: Failed to load pretrained weights: {e}")
     
-    # Create normalized loss function
     normalized_regression_loss = create_minmax_normalized_mse_loss(global_reg_stats)
     
-    # Setup callbacks
     run_id = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     callbacks = [
         CSVLogger(f'{log_root}/train_{run_id}.csv'),
@@ -269,7 +259,6 @@ if __name__ == "__main__":
         albu.HorizontalFlip(),
         albu.VerticalFlip(),
         albu.ColorJitter(brightness=(0.6, 1.6), contrast=0.2, saturation=0.1, hue=0.01, always_apply=True),
-        albu.Affine(scale=(0.5, 1.5), translate_percent=(-0.125, 0.125), rotate=(-180, 180), shear=(-22.5, 22), always_apply=True),
     ])
     
     main() 
