@@ -42,7 +42,6 @@ class LargeDatasetGenerator:
         # Create groups
         self._create_groups()
         
-        
     def _load_label_map(self):
         """Load label map from CSV"""
         label_map = {}
@@ -83,8 +82,6 @@ class LargeDatasetGenerator:
                 out.append(fn)
         return sorted(out)
 
-        
-    
     def _get_reg_labels(self, file_list):
         """Return regression labels for file list"""
         regs = []
@@ -122,7 +119,6 @@ class LargeDatasetGenerator:
             self.groups.append(group)
         
         print(f"Created {len(self.groups)} groups of size ~{self.group_size}")
-    
     
     def load_group_data(self, group_idx):
         """Load data for a specific group"""
@@ -233,17 +229,4 @@ class LargeDatasetGenerator:
         }
 
 
-def create_minmax_normalized_mse_loss(reg_stats):
-    """
-    Create MSE loss normalized using min-max scaling from statistics
-    """
-    reg_min, reg_max = reg_stats['min'], reg_stats['max']
-    reg_range = reg_max - reg_min + 1e-8
-
-    def minmax_normalized_mse_loss(y_true, y_pred):
-        y_true_norm = (y_true - reg_min) / reg_range
-        y_pred_norm = (y_pred - reg_min) / reg_range
-        
-        return tf.keras.losses.mean_squared_error(y_true_norm, y_pred_norm)
     
-    return minmax_normalized_mse_loss 
