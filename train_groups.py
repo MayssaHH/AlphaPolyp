@@ -7,9 +7,9 @@ from tensorflow_addons.optimizers import AdamW
 import tensorflow as tf
 import argparse
 
-from model_architecture.DiceLoss import dice_metric_loss
+from model_architecture.LossFunctions import dice_metric_loss, normalized_mse_loss
 from model_architecture.model import create_model
-from model_architecture.DataGenerator import LargeDatasetGenerator, create_minmax_normalized_mse_loss
+from model_architecture.DataGenerator import LargeDatasetGenerator
 
 
 parser = argparse.ArgumentParser(description='Train AlphaPolyp model per group')
@@ -181,7 +181,7 @@ def main():
         exit(1)
     
     try:
-        model = create_model(img_height=img_size, img_width=img_size, input_channels=3, out_classes=1, starting_filters=filters, reg_mean_norm=global_reg_stats['mean'])
+        model = create_model(img_height=img_size, img_width=img_size, input_channels=3, out_classes=1, starting_filters=filters, bias=global_reg_stats['mean'])
         print("Model created successfully")
     except Exception as e:
         print(f"ERROR: Failed to create model: {e}")
@@ -194,16 +194,14 @@ def main():
         except Exception as e:
             print(f"Warning: Failed to load pretrained weights: {e}")
     
-    normalized_regression_loss = create_minmax_normalized_mse_loss(global_reg_stats)
-    
     run_id = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     callbacks = [
         CSVLogger(f'{log_root}/train_{run_id}.csv'),
         TensorBoard(log_dir=f'{log_root}/tb_{run_id}'),
         ModelCheckpoint('alphapolyp_optimized_model.h5',
-                       monitor='val_segmentation_output_loss',
+                       monitor='val_regression_output_loss',
                        save_best_only=True, verbose=1),
-        ReduceLROnPlateau(monitor='val_segmentation_output_loss',
+        ReduceLROnPlateau(monitor='val_regression_output_loss',
                          factor=0.5, patience=8, verbose=1)
     ]
     
@@ -214,16 +212,19 @@ def main():
     print(f"Phase 1: {epochs_phase1} epochs per group (regression head only)")
     print(f"Phase 2: {epochs_phase2} epochs per group (all layers)")
     
+    mse_loss = normalized_mse_loss(reg_stats=global_reg_stats)
     # PHASE 1: Train regression head only
     print("\n=== PHASE 1: Training Regression Head Only ===")
     freeze_layers_except_regression(model)
     
     model.compile(
-        optimizer=AdamW(1e-4, weight_decay=1e-6),
+        optimizer=AdamW(weight_decay=1e-6, learning_rate=1e-4),
         loss={'segmentation_output': dice_metric_loss,
-              'regression_output': normalized_regression_loss},
+              'regression_output': mse_loss},
         loss_weights={'segmentation_output': 1.0,
-                     'regression_output': 1.0}
+                     'regression_output': 1.0},
+        metrics={'segmentation_output': ["accuracy"],
+                'regression_output': ["mse"]} 
     )
     
     for group_idx in range(num_groups):
@@ -236,11 +237,13 @@ def main():
     unfreeze_all_layers(model)
     
     model.compile(
-        optimizer=AdamW(1e-5, weight_decay=1e-6),
+        optimizer=AdamW(weight_decay=1e-6, learning_rate=1e-4),
         loss={'segmentation_output': dice_metric_loss,
-              'regression_output': normalized_regression_loss},
+              'regression_output': mse_loss},
         loss_weights={'segmentation_output': 1.0,
-                     'regression_output': 1.0}
+                     'regression_output': 1.0},
+        metrics={'segmentation_output': ["accuracy"],
+                'regression_output': ["mse"]}
     )
     
     for group_idx in range(num_groups):
