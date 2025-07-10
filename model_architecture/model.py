@@ -1,4 +1,3 @@
-from ast import Constant
 import tensorflow as tf
 from keras.layers import Conv2D, UpSampling2D, AveragePooling2D, GlobalAveragePooling2D
 from keras.layers import add
@@ -83,7 +82,7 @@ def create_model(img_height, img_width, input_channels, out_classes, starting_fi
     x = tf.keras.layers.Dense(32, activation='relu')(x)
 
     # Initialize the bias of the regression output layer
-    bias_init = Constant(bias) if bias is not None else "zeros"
+    bias_init = tf.keras.initializers.Constant(bias) if bias is not None else "zeros"
 
     regression_output = tf.keras.layers.Dense(4, activation='relu', bias_initializer=bias_init, name="regression_output")(x)
     
