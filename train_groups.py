@@ -2,7 +2,7 @@ import os, gc, datetime
 import numpy as np
 import albumentations as albu
 import pickle
-from keras.callbacks import CSVLogger, ModelCheckpoint, TensorBoard, ReduceLROnPlateau
+from keras.callbacks import CSVLogger, ModelCheckpoint, TensorBoard, ReduceLROnPlateau, EarlyStopping, TerminateOnNaN, BackupAndRestore, LambdaCallback
 from tensorflow_addons.optimizers import AdamW
 import tensorflow as tf
 import argparse
@@ -29,7 +29,7 @@ stats_path = args.stats
 img_size = 352
 filters = 17
 batch_size = 8
-group_size = 40  # Number of images per group
+group_size = 100  # Number of images per group
 seed = 58800
 
 # Training phases
@@ -196,14 +196,53 @@ def main():
     
     run_id = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     callbacks = [
-        CSVLogger(f'{log_root}/train_{run_id}.csv'),
-        TensorBoard(log_dir=f'{log_root}/tb_{run_id}'),
-        ModelCheckpoint('alphapolyp_optimized_model.h5',
-                       monitor='val_regression_output_loss',
-                       save_best_only=True, verbose=1),
-        ReduceLROnPlateau(monitor='val_regression_output_loss',
-                         factor=0.5, patience=8, verbose=1)
+      CSVLogger(f"{log_root}/train_{run_id}.csv"),
+      TensorBoard(log_dir=f"{log_root}/tb_{run_id}"),
+
+      # — save two best snapshots, one per task —
+      ModelCheckpoint(
+          filepath=f"{log_root}/best_reg_{run_id}.h5",
+          monitor="val_regression_output_loss",
+          save_best_only=True,
+          save_weights_only=True,
+          verbose=1
+      ),
+      ModelCheckpoint(
+          filepath=f"{log_root}/best_dice_{run_id}.h5",
+          monitor="val_segmentation_output_dice",
+          mode="max",
+          save_best_only=True,
+          save_weights_only=True,
+          verbose=1
+      ),
+
+      # — LR scheduler on the *combined* loss; quicker reaction —
+      ReduceLROnPlateau(
+          monitor="val_loss",
+          factor=0.5,
+          patience=6,
+          cooldown=2,
+          min_lr=1e-6,
+          verbose=1
+      ),
+
+      # — graceful stop & resume —
+      EarlyStopping(
+          monitor="val_loss",
+          patience=16,
+          restore_best_weights=True,
+          verbose=1
+      ),
+      TerminateOnNaN(),
+      BackupAndRestore(backup_dir=".keras_backups"),
+
+      # — log the LR each epoch to TensorBoard —
+      LambdaCallback(
+          on_epoch_end=lambda epoch, logs:
+              logs.update(lr=tf.keras.backend.get_value(model.optimizer.lr))
+      ),
     ]
+
     
     # Training loop over groups
     num_groups = data_generator.get_num_groups()
@@ -221,7 +260,7 @@ def main():
         optimizer=AdamW(weight_decay=1e-6, learning_rate=1e-4),
         loss={'segmentation_output': dice_metric_loss,
               'regression_output': mse_loss},
-        loss_weights={'segmentation_output': 1.0,
+        loss_weights={'segmentation_output': 0.0,
                      'regression_output': 1.0},
         metrics={'segmentation_output': ["accuracy"],
                 'regression_output': ["mse"]} 
