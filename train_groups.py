@@ -263,7 +263,7 @@ def main():
         loss_weights={'segmentation_output': 0.0,
                      'regression_output': 1.0},
         metrics={'segmentation_output': ["accuracy"],
-                'regression_output': ["mse"]} 
+                'regression_output': [mse_loss]} 
     )
     
     for group_idx in range(num_groups):
@@ -282,7 +282,7 @@ def main():
         loss_weights={'segmentation_output': 1.0,
                      'regression_output': 1.0},
         metrics={'segmentation_output': ["accuracy"],
-                'regression_output': ["mse"]}
+                'regression_output': [mse_loss]}
     )
     
     for group_idx in range(num_groups):
