@@ -1,306 +1,376 @@
-import os, gc, datetime
-import numpy as np
-import albumentations as albu
+"""
+train_groups.py  —  AlphaPolyp large-dataset training script (tf.data pipeline).
+
+With the tf.data pipeline, the old "group" concept (manually splitting the
+dataset into RAM-sized chunks) is no longer needed: tf.data streams and
+prefetches batches automatically.  This script is therefore a thin wrapper
+around train.py's logic that accepts the same arguments and data layout.
+
+Expected data layout  (identical to train.py)
+---------------------------------------------
+<root>/
+  cyclegan_images/{train,test}/
+  images/{train,test}/
+  masks/{train,test}/
+  train_labels.csv    (columns: Filename, logVolume, x, y, z)
+  test_labels.csv
+
+Usage
+-----
+python train_groups.py --root /path/to/data [--pretrained rapunet_pretrained.h5]
+"""
+
+import os
+import csv
+import time
 import pickle
-from keras.callbacks import CSVLogger, ModelCheckpoint, TensorBoard, ReduceLROnPlateau, EarlyStopping, TerminateOnNaN, BackupAndRestore, LambdaCallback
-from tensorflow_addons.optimizers import AdamW
-import tensorflow as tf
+import datetime
 import argparse
+import numpy as np
+import tensorflow as tf
+from keras.callbacks import (
+    CSVLogger, ModelCheckpoint, TensorBoard,
+    ReduceLROnPlateau, EarlyStopping, TerminateOnNaN,
+    BackupAndRestore, LambdaCallback,
+)
+from tensorflow_addons.optimizers import AdamW
 
-from model_architecture.LossFunctions import dice_metric_loss, normalized_mse_loss
-from model_architecture.model import create_model
-from model_architecture.DataGenerator import LargeDatasetGenerator
+from model_architecture.LossFunctions    import dice_metric_loss, normalized_mse_loss
+from model_architecture.model            import create_model
+from model_architecture.tf_data_pipeline import build_dataset
+from model_architecture.training_report  import generate_report
+
+START_TIME = time.time()
 
 
-parser = argparse.ArgumentParser(description='Train AlphaPolyp model per group')
-parser.add_argument('--root', type=str, required=True, help='Root path to data')
-parser.add_argument('--csv', type=str, required=True, help='CSV file for labels')
-parser.add_argument('--stats', type=str, required=True, help='Path to global regression stats')
+# ─────────────────────────────────────────────────────────────────────────────
+# CLI
+# ─────────────────────────────────────────────────────────────────────────────
+
+parser = argparse.ArgumentParser(description='Train AlphaPolyp — large dataset path')
+parser.add_argument('--root',       type=str, required=True,
+                    help='Root data directory')
+parser.add_argument('--pretrained', type=str, default='rapunet_pretrained.h5',
+                    help='Path to pretrained RAPUNet checkpoint (optional)')
+parser.add_argument('--cache', type=str, default='',
+                    help='tf.data cache: empty=off, "ram"=RAM, or a directory path for disk cache')
 args = parser.parse_args()
 
-drive_base = args.root
-real_img_dir = os.path.join(drive_base, 'cyclegan_images')
-real_mask_dir = os.path.join(drive_base, 'masks')
-synth_img_dir = os.path.join(drive_base, 'images')
-synth_mask_dir = os.path.join(drive_base, 'masks')
-csv_labels = args.csv
-stats_path = args.stats
+root = args.root
 
-img_size = 352
-filters = 17
-batch_size = 8
-group_size = 100  # Number of images per group
-seed = 58800
 
-# Training phases
-epochs_phase1 = 10  # Regression head only
-epochs_phase2 = 15  # Fine-tune all layers
+# ─────────────────────────────────────────────────────────────────────────────
+# Paths
+# ─────────────────────────────────────────────────────────────────────────────
 
-# Pretrained checkpoint
-pretrained_ckpt = 'rapunet_pretrained.h5'
+REAL_TRAIN_IMG  = os.path.join(root, 'cyclegan_images', 'train')
+SYNTH_TRAIN_IMG = os.path.join(root, 'images',          'train')
+TRAIN_MASK_DIR  = os.path.join(root, 'masks',           'train')
+REAL_VAL_IMG    = os.path.join(root, 'cyclegan_images', 'test')
+SYNTH_VAL_IMG   = os.path.join(root, 'images',          'test')
+VAL_MASK_DIR    = os.path.join(root, 'masks',           'test')
+TRAIN_CSV       = os.path.join(root, 'train_labels.csv')
+VAL_CSV         = os.path.join(root, 'test_labels.csv')
 
-log_root = './logs'
-os.makedirs(log_root, exist_ok=True)
+for path, label in [
+    (REAL_TRAIN_IMG,  'cyclegan_images/train'),
+    (SYNTH_TRAIN_IMG, 'images/train'),
+    (TRAIN_MASK_DIR,  'masks/train'),
+    (REAL_VAL_IMG,    'cyclegan_images/test'),
+    (SYNTH_VAL_IMG,   'images/test'),
+    (VAL_MASK_DIR,    'masks/test'),
+    (TRAIN_CSV,       'train_labels.csv'),
+    (VAL_CSV,         'test_labels.csv'),
+]:
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Required path missing — {label}: {path}")
 
-def validate_paths():
-    """Validate that all required paths exist"""
-    paths_to_check = [
-        (real_img_dir, "Real images directory"),
-        (real_mask_dir, "Real masks directory"), 
-        (synth_img_dir, "Synthetic images directory"),
-        (synth_mask_dir, "Synthetic masks directory"),
-        (csv_labels, "CSV labels file"),
-        (stats_path, "Global regression stats file")
-    ]
-    
-    missing_paths = []
-    for path, description in paths_to_check:
-        if not os.path.exists(path):
-            missing_paths.append(f"{description}: {path}")
-    
-    if missing_paths:
-        print("ERROR: Missing required paths:")
-        for path in missing_paths:
-            print(f"  - {path}")
-        print("\nPlease ensure all paths exist before running training.")
-        return False
-    return True
 
-def augment_batch(X, M, R):
-    """
-    Apply albumentations to images & masks
-    Leave regression labels unchanged.
-    """
-    Xa, Ma, Ra = [], [], []
-    for img, msk, reg in zip(X, M, R):
-        try:
-            a = aug(image=(img*255).astype(np.uint8),
-                    mask=(msk*255).astype(np.uint8))
-            Xa.append(a['image'] / 255.0)
-            Ma.append(a['mask'] / 255.0)
-            Ra.append(reg)
-        except Exception as e:
-            print(f"Warning: Augmentation failed for sample: {e}")
-            # Use original data if augmentation fails
-            Xa.append(img)
-            Ma.append(msk)
-            Ra.append(reg)
-    return (np.array(Xa, dtype=np.float32),
-            np.expand_dims(np.array(Ma, dtype=np.float32), -1),
-            np.array(Ra, dtype=np.float32))
+# ─────────────────────────────────────────────────────────────────────────────
+# Hyper-parameters
+# ─────────────────────────────────────────────────────────────────────────────
 
-def freeze_layers_except_regression(model):
-    """Freeze all layers except regression output"""
-    for layer in model.layers:
-        if 'regression_output' in layer.name:
-            layer.trainable = True
-        else:
-            layer.trainable = False
+IMG_SIZE   = 352
+FILTERS    = 17
+BATCH_SIZE = 8
+SEED       = 58800
+EPOCHS_P1  = 10
+EPOCHS_P2  = 50
+LOG_ROOT   = './logs'
+os.makedirs(LOG_ROOT, exist_ok=True)
 
-def unfreeze_all_layers(model):
-    """Unfreeze all layers"""
-    for layer in model.layers:
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers (shared with train.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def load_label_map(csv_path):
+    label_map = {}
+    with open(csv_path, newline='', encoding='utf-8-sig') as f:
+        for row in csv.DictReader(f):
+            try:
+                label_map[row['Filename']] = [
+                    float(row['logVolume']), float(row['x']),
+                    float(row['y']),         float(row['z']),
+                ]
+            except (KeyError, ValueError) as e:
+                print(f"  Warning: skipping row: {e}")
+    return label_map
+
+
+def build_paths(img_dir, mask_dir, label_map):
+    img_paths, mask_paths, reg_labels = [], [], []
+    skipped = 0
+    files = sorted(f for f in os.listdir(img_dir)
+                   if f.lower().endswith(('.jpg', '.png', '.jpeg')))
+    for fname in files:
+        base  = os.path.splitext(fname)[0]
+        label = None
+        for key in (base, base + '_labeled.obj', fname):
+            if key in label_map:
+                label = label_map[key]
+                break
+        if label is None:
+            skipped += 1
+            continue
+        mask_path = os.path.join(mask_dir, base + '.png')
+        if not os.path.exists(mask_path):
+            skipped += 1
+            continue
+        img_paths.append(os.path.join(img_dir, fname))
+        mask_paths.append(mask_path)
+        reg_labels.append(label)
+    print(f"  {os.path.relpath(img_dir, root)}: {len(img_paths)} matched, {skipped} skipped")
+    return img_paths, mask_paths, reg_labels
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Labels + path lists
+# ─────────────────────────────────────────────────────────────────────────────
+
+print("Loading label maps...")
+train_lm = load_label_map(TRAIN_CSV)
+val_lm   = load_label_map(VAL_CSV)
+print(f"  train: {len(train_lm)} entries  |  val: {len(val_lm)} entries")
+
+print("Building path lists...")
+ri_t, rm_t, rr_t = build_paths(REAL_TRAIN_IMG,  TRAIN_MASK_DIR, train_lm)
+si_t, sm_t, sr_t = build_paths(SYNTH_TRAIN_IMG, TRAIN_MASK_DIR, train_lm)
+ri_v, rm_v, rr_v = build_paths(REAL_VAL_IMG,    VAL_MASK_DIR,   val_lm)
+si_v, sm_v, sr_v = build_paths(SYNTH_VAL_IMG,   VAL_MASK_DIR,   val_lm)
+
+train_imgs  = ri_t + si_t;  train_masks = rm_t + sm_t;  train_regs  = rr_t + sr_t
+val_imgs    = ri_v + si_v;  val_masks   = rm_v + sm_v;  val_regs    = rr_v + sr_v
+
+if not train_imgs:
+    raise RuntimeError("No training samples matched. Check CSV Filename column.")
+if not val_imgs:
+    raise RuntimeError("No validation samples found.")
+
+print(f"\nDataset: {len(train_imgs)} train  |  {len(val_imgs)} val")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Regression stats (training set only)
+# ─────────────────────────────────────────────────────────────────────────────
+
+train_reg_arr = np.array(train_regs, dtype=np.float32)
+reg_stats = {
+    'min':   train_reg_arr.min(axis=0),
+    'max':   train_reg_arr.max(axis=0),
+    'mean':  train_reg_arr.mean(axis=0),
+    'std':   train_reg_arr.std(axis=0),
+    'range': train_reg_arr.max(axis=0) - train_reg_arr.min(axis=0),
+}
+print("\nRegression stats (training set):")
+for i, name in enumerate(['logVolume', 'x', 'y', 'z']):
+    print(f"  {name:12s}: min={reg_stats['min'][i]:.3f}  max={reg_stats['max'][i]:.3f}  "
+          f"mean={reg_stats['mean'][i]:.3f}")
+
+pickle.dump(reg_stats, open('regression_stats.pkl', 'wb'))
+print("Saved regression_stats.pkl")
+
+mse_loss = normalized_mse_loss(reg_stats)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Resolve cache argument
+# ─────────────────────────────────────────────────────────────────────────────
+
+cache_arg: bool | str = False
+if args.cache == 'ram':
+    cache_arg = True
+elif args.cache:
+    os.makedirs(args.cache, exist_ok=True)
+    cache_arg = args.cache
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# tf.data datasets
+# ─────────────────────────────────────────────────────────────────────────────
+
+print("\nBuilding tf.data datasets...")
+train_ds = build_dataset(
+    train_imgs, train_masks, train_regs,
+    img_size=IMG_SIZE, batch_size=BATCH_SIZE,
+    training=True, seed=SEED, cache=cache_arg,
+)
+val_ds = build_dataset(
+    val_imgs, val_masks, val_regs,
+    img_size=IMG_SIZE, batch_size=BATCH_SIZE,
+    training=False, seed=SEED, cache=False,
+)
+print("Datasets ready.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Model
+# ─────────────────────────────────────────────────────────────────────────────
+
+model = create_model(
+    img_height=IMG_SIZE, img_width=IMG_SIZE, input_channels=3,
+    out_classes=1, starting_filters=FILTERS,
+    bias=reg_stats['mean'],
+)
+print(f"\nModel: {model.count_params():,} parameters")
+
+if os.path.exists(args.pretrained):
+    model.load_weights(args.pretrained, by_name=True, skip_mismatch=True)
+    print(f"Loaded pretrained weights: {args.pretrained}")
+
+def _freeze_except_regression(m):
+    for layer in m.layers:
+        layer.trainable = ('regression_output' in layer.name)
+
+def _unfreeze_all(m):
+    for layer in m.layers:
         layer.trainable = True
 
-def train_on_group(model, data_generator, group_idx, phase, epochs, callbacks):
-    """Train model on a specific group"""
-    print(f"\n=== Training on Group {group_idx} (Phase {phase}) ===")
-    
-    # Get group info
-    group_info = data_generator.get_group_info(group_idx)
-    print(f"Group {group_idx}: {group_info['total_samples']} samples "
-          f"({group_info['real_samples']} real, {group_info['synthetic_samples']} synthetic)")
-    
-    # Load and split data for this group
-    x_train, y_train_mask, y_train_reg, x_val, y_val_mask, y_val_reg = \
-        data_generator.get_group_train_val_split(group_idx)
-    
-    if len(x_train) < 10:
-        print(f"Warning: Group {group_idx} has insufficient training data ({len(x_train)} samples)")
-        return False
-    
-    print(f"Training samples: {len(x_train)}, Validation samples: {len(x_val)}")
-    
-    # Train for specified epochs
-    for epoch in range(epochs):
-        try:
-            print(f"Epoch {epoch + 1}/{epochs}")
-            
-            # Apply augmentation
-            Xa, Ma, Ra = augment_batch(x_train, y_train_mask, y_train_reg)
-            
-            # Train
-            history = model.fit(
-                Xa,
-                {'segmentation_output': Ma,
-                 'regression_output': Ra},
-                validation_data=(x_val,
-                               {'segmentation_output': y_val_mask,
-                                'regression_output': y_val_reg}),
-                epochs=1, batch_size=batch_size,
-                callbacks=callbacks, verbose=1
-            )
-            
-            # Clean up memory
-            del Xa, Ma, Ra
-            gc.collect()
-            
-        except Exception as e:
-            print(f"ERROR: Training failed at epoch {epoch + 1}: {e}")
-            return False
-    
-    return True
 
-def main():
-    """Main training function"""
-    print("=== AlphaPolyp Large Dataset Training ===")
-    
-    if not validate_paths():
-        exit(1)
-    
-    with open(stats_path, 'rb') as f:
-        global_reg_stats = pickle.load(f)
-    print(f"Loaded global regression statistics from {stats_path}")
-    
+# ─────────────────────────────────────────────────────────────────────────────
+# Callbacks
+# ─────────────────────────────────────────────────────────────────────────────
+
+run_id = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+
+def _lr_log(epoch, logs):
     try:
-        print("Initializing data generator...")
-        data_generator = LargeDatasetGenerator(
-            real_img_dir=real_img_dir,
-            real_mask_dir=real_mask_dir,
-            synth_img_dir=synth_img_dir,
-            synth_mask_dir=synth_mask_dir,
-            csv_labels=csv_labels,
-            img_size=img_size,
-            group_size=group_size,
-            batch_size=batch_size,
-            seed=seed
-        )
-        print(f"Data generator initialized with {data_generator.get_num_groups()} groups")
-    except Exception as e:
-        print(f"ERROR: Failed to initialize data generator: {e}")
-        exit(1)
-    
-    try:
-        model = create_model(img_height=img_size, img_width=img_size, input_channels=3, out_classes=1, starting_filters=filters, bias=global_reg_stats['mean'])
-        print("Model created successfully")
-    except Exception as e:
-        print(f"ERROR: Failed to create model: {e}")
-        exit(1)
-    
-    if os.path.exists(pretrained_ckpt):
-        try:
-            model.load_weights(pretrained_ckpt, by_name=True, skip_mismatch=True)
-            print('Loaded pretrained RAPUNet weights.')
-        except Exception as e:
-            print(f"Warning: Failed to load pretrained weights: {e}")
-    
-    run_id = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-    callbacks = [
-      CSVLogger(f"{log_root}/train_{run_id}.csv"),
-      TensorBoard(log_dir=f"{log_root}/tb_{run_id}"),
+        logs['lr'] = float(model.optimizer.learning_rate)
+    except Exception:
+        pass
 
-      # — save two best snapshots, one per task —
-      ModelCheckpoint(
-          filepath=f"{log_root}/best_reg_{run_id}.h5",
-          monitor="val_regression_output_loss",
-          save_best_only=True,
-          save_weights_only=True,
-          verbose=1
-      ),
-      ModelCheckpoint(
-          filepath=f"{log_root}/best_dice_{run_id}.h5",
-          monitor="val_segmentation_output_dice",
-          mode="max",
-          save_best_only=True,
-          save_weights_only=True,
-          verbose=1
-      ),
+phase1_callbacks = [
+    CSVLogger(f'{LOG_ROOT}/phase1_{run_id}.csv'),
+    TensorBoard(log_dir=f'{LOG_ROOT}/tb_phase1_{run_id}'),
+    ModelCheckpoint(
+        f'{LOG_ROOT}/phase1_best_reg_{run_id}.weights.h5',
+        monitor='val_regression_output_loss', save_best_only=True,
+        save_weights_only=True, verbose=1,
+    ),
+    ReduceLROnPlateau(
+        monitor='val_regression_output_loss', factor=0.5,
+        patience=4, min_lr=1e-7, verbose=1,
+    ),
+    TerminateOnNaN(),
+    BackupAndRestore(backup_dir=os.path.join(LOG_ROOT, 'backup_phase1')),
+    LambdaCallback(on_epoch_end=_lr_log),
+]
 
-      # — LR scheduler on the *combined* loss; quicker reaction —
-      ReduceLROnPlateau(
-          monitor="val_loss",
-          factor=0.5,
-          patience=6,
-          cooldown=2,
-          min_lr=1e-6,
-          verbose=1
-      ),
+phase2_callbacks = [
+    CSVLogger(f'{LOG_ROOT}/phase2_{run_id}.csv'),
+    TensorBoard(log_dir=f'{LOG_ROOT}/tb_phase2_{run_id}'),
+    ModelCheckpoint(
+        f'{LOG_ROOT}/phase2_best_reg_{run_id}.weights.h5',
+        monitor='val_regression_output_loss', save_best_only=True,
+        save_weights_only=True, verbose=1,
+    ),
+    ModelCheckpoint(
+        f'{LOG_ROOT}/phase2_best_seg_{run_id}.weights.h5',
+        monitor='val_segmentation_output_loss', mode='min',
+        save_best_only=True, save_weights_only=True, verbose=1,
+    ),
+    ReduceLROnPlateau(
+        monitor='val_loss', factor=0.5, patience=6,
+        cooldown=2, min_lr=1e-7, verbose=1,
+    ),
+    EarlyStopping(
+        monitor='val_loss', patience=16,
+        restore_best_weights=True, verbose=1,
+    ),
+    TerminateOnNaN(),
+    BackupAndRestore(backup_dir=os.path.join(LOG_ROOT, 'backup_phase2')),
+    LambdaCallback(on_epoch_end=_lr_log),
+]
 
-      # — graceful stop & resume —
-      EarlyStopping(
-          monitor="val_loss",
-          patience=16,
-          restore_best_weights=True,
-          verbose=1
-      ),
-      TerminateOnNaN(),
-      BackupAndRestore(backup_dir=".keras_backups"),
 
-      # — log the LR each epoch to TensorBoard —
-      LambdaCallback(
-          on_epoch_end=lambda epoch, logs:
-              logs.update(lr=tf.keras.backend.get_value(model.optimizer.lr))
-      ),
-    ]
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 1 — regression head warm-up
+# ─────────────────────────────────────────────────────────────────────────────
 
-    
-    # Training loop over groups
-    num_groups = data_generator.get_num_groups()
-    
-    print(f"\n=== Starting Training on {num_groups} Groups ===")
-    print(f"Phase 1: {epochs_phase1} epochs per group (regression head only)")
-    print(f"Phase 2: {epochs_phase2} epochs per group (all layers)")
-    
-    mse_loss = normalized_mse_loss(reg_stats=global_reg_stats)
-    # PHASE 1: Train regression head only
-    print("\n=== PHASE 1: Training Regression Head Only ===")
-    freeze_layers_except_regression(model)
-    
-    model.compile(
-        optimizer=AdamW(weight_decay=1e-6, learning_rate=1e-4),
-        loss={'segmentation_output': dice_metric_loss,
-              'regression_output': mse_loss},
-        loss_weights={'segmentation_output': 0.0,
-                     'regression_output': 1.0},
-        metrics={'segmentation_output': ["accuracy"],
-                'regression_output': [mse_loss]} 
-    )
-    
-    for group_idx in range(num_groups):
-        success = train_on_group(model, data_generator, group_idx, 1, epochs_phase1, callbacks)
-        if not success:
-            print(f"Warning: Failed to train on group {group_idx}, continuing...")
-    
-    # PHASE 2: Fine-tune all layers
-    print("\n=== PHASE 2: Fine-tuning All Layers ===")
-    unfreeze_all_layers(model)
-    
-    model.compile(
-        optimizer=AdamW(weight_decay=1e-6, learning_rate=1e-4),
-        loss={'segmentation_output': dice_metric_loss,
-              'regression_output': mse_loss},
-        loss_weights={'segmentation_output': 1.0,
-                     'regression_output': 1.0},
-        metrics={'segmentation_output': ["accuracy"],
-                'regression_output': [mse_loss]}
-    )
-    
-    for group_idx in range(num_groups):
-        success = train_on_group(model, data_generator, group_idx, 2, epochs_phase2, callbacks)
-        if not success:
-            print(f"Warning: Failed to train on group {group_idx}, continuing...")
-    
-    print("\n=== Training Complete ===")
-    print("Final model saved as: alphapolyp_optimized_model.h5")
-    print("Global regression statistics saved as: global_regression_stats.pkl")
-    print("Note: Regression outputs are in original scale. Use global_regression_stats.pkl for denormalization.")
+print(f"\n{'='*60}")
+print(f" Phase 1 — {EPOCHS_P1} epochs  (regression head only)")
+print(f"{'='*60}")
 
-if __name__ == "__main__":
-    # Define augmentation pipeline
-    aug = albu.Compose([
-        albu.HorizontalFlip(),
-        albu.VerticalFlip(),
-        albu.ColorJitter(brightness=(0.6, 1.6), contrast=0.2, saturation=0.1, hue=0.01, always_apply=True),
-    ])
-    
-    main() 
+_freeze_except_regression(model)
+model.compile(
+    optimizer=AdamW(learning_rate=1e-4, weight_decay=1e-6),
+    loss={'segmentation_output': dice_metric_loss,
+          'regression_output':   mse_loss},
+    loss_weights={'segmentation_output': 0.0,
+                  'regression_output':   1.0},
+)
+model.fit(train_ds, validation_data=val_ds,
+          epochs=EPOCHS_P1, callbacks=phase1_callbacks)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 2 — full fine-tune
+# ─────────────────────────────────────────────────────────────────────────────
+
+print(f"\n{'='*60}")
+print(f" Phase 2 — up to {EPOCHS_P2} epochs  (all layers, EarlyStopping active)")
+print(f"{'='*60}")
+
+_unfreeze_all(model)
+model.compile(
+    optimizer=AdamW(learning_rate=1e-5, weight_decay=1e-6),
+    loss={'segmentation_output': dice_metric_loss,
+          'regression_output':   mse_loss},
+    loss_weights={'segmentation_output': 1.0,
+                  'regression_output':   1.0},
+)
+model.fit(train_ds, validation_data=val_ds,
+          epochs=EPOCHS_P2, callbacks=phase2_callbacks)
+
+# Save final best weights (EarlyStopping has restored them already)
+final_ckpt = os.path.join(LOG_ROOT, f'final_best_{run_id}.weights.h5')
+model.save_weights(final_ckpt)
+
+report_path = generate_report(
+    run_id        = run_id,
+    log_root      = LOG_ROOT,
+    reg_stats     = reg_stats,
+    n_train       = len(train_imgs),
+    n_val         = len(val_imgs),
+    n_real_train  = len(ri_t),
+    n_synth_train = len(si_t),
+    n_real_val    = len(ri_v),
+    n_synth_val   = len(si_v),
+    img_size      = IMG_SIZE,
+    batch_size    = BATCH_SIZE,
+    filters       = FILTERS,
+    epochs_p1     = EPOCHS_P1,
+    epochs_p2     = EPOCHS_P2,
+    n_params      = model.count_params(),
+    pretrained    = args.pretrained,
+    pretrained_loaded = os.path.exists(args.pretrained),
+    start_time    = START_TIME,
+)
+
+print(f"\n{'='*60}")
+print(f" Training complete.")
+print(f"{'='*60}")
+print(f"  Report        : {report_path}")
+print(f"  Final weights : {final_ckpt}")
+print(f"  Stats         : regression_stats.pkl")
+print(f"  TensorBoard   : tensorboard --logdir {LOG_ROOT}")

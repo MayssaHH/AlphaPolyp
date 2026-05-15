@@ -1,385 +1,436 @@
-import os, csv, gc, datetime
-import numpy as np
-import albumentations as albu
+"""
+train.py  —  AlphaPolyp training script (tf.data pipeline).
+
+Expected data layout
+--------------------
+<root>/
+  cyclegan_images/train/   ← real colonoscopy images (train)
+  cyclegan_images/test/    ← real colonoscopy images (val / held-out test)
+  images/train/            ← synthetic CycleGAN images (train)
+  images/test/             ← synthetic CycleGAN images (val)
+  masks/train/             ← binary masks for BOTH real + synthetic (train)
+  masks/test/              ← binary masks for BOTH real + synthetic (val)
+  train_labels.csv         ← columns: Filename, logVolume, x, y, z
+  test_labels.csv          ← same schema
+
+Usage
+-----
+python train.py --root /path/to/data [--pretrained rapunet_pretrained.h5]
+"""
+
+import os
+import csv
+import time
 import pickle
-from sklearn.model_selection import train_test_split
-from keras.callbacks import CSVLogger, ModelCheckpoint, TensorBoard, ReduceLROnPlateau
-from tensorflow_addons.optimizers import AdamW
-import tensorflow as tf
+import datetime
 import argparse
+import numpy as np
+import tensorflow as tf
+from keras.callbacks import (
+    CSVLogger, ModelCheckpoint, TensorBoard,
+    ReduceLROnPlateau, EarlyStopping, TerminateOnNaN,
+    BackupAndRestore, LambdaCallback,
+)
+from tensorflow_addons.optimizers import AdamW
 
-from model_architecture.DiceLoss import dice_metric_loss
-from model_architecture.model   import create_model
-from model_architecture.ImageLoader2D  import load_images_masks_from_drive
+from model_architecture.LossFunctions      import dice_metric_loss, normalized_mse_loss
+from model_architecture.model              import create_model
+from model_architecture.tf_data_pipeline   import build_dataset
+from model_architecture.training_report    import generate_report
 
-# Argument parsing
-parser = argparse.ArgumentParser(description='Train AlphaPolyp model')
-parser.add_argument('--root', type=str, required=True, help='Root path to data (drive_base)')
-parser.add_argument('--csv', type=str, required=True, help='CSV file with labels')
+START_TIME = time.time()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CLI
+# ─────────────────────────────────────────────────────────────────────────────
+
+parser = argparse.ArgumentParser(description='Train AlphaPolyp (tf.data pipeline)')
+parser.add_argument('--root',       type=str, required=True,
+                    help='Root data directory (see layout above)')
+parser.add_argument('--pretrained', type=str, default='rapunet_pretrained.h5',
+                    help='Path to pretrained RAPUNet checkpoint (optional)')
 args = parser.parse_args()
 
-drive_base     = args.root
-real_img_dir  = os.path.join(drive_base, 'cyclegan_images')
-real_mask_dir = os.path.join(drive_base, 'masks')
-synth_img_dir  = os.path.join(drive_base, 'images')
-synth_mask_dir = os.path.join(drive_base, 'masks')
-csv_labels     = args.csv
+root = args.root
 
 
-img_size       = 384
-filters        = 17
-batch_size     = 8
-seed           = 58800
+# ─────────────────────────────────────────────────────────────────────────────
+# Paths
+# ─────────────────────────────────────────────────────────────────────────────
 
-def validate_paths():
-    """Validate that all required paths exist"""
-    paths_to_check = [
-        (real_img_dir, "Real images directory"),
-        (real_mask_dir, "Real masks directory"), 
-        (synth_img_dir, "Synthetic images directory"),
-        (synth_mask_dir, "Synthetic masks directory"),
-        (csv_labels, "CSV labels file")
-    ]
-    
-    missing_paths = []
-    for path, description in paths_to_check:
-        if not os.path.exists(path):
-            missing_paths.append(f"{description}: {path}")
-    
-    if missing_paths:
-        print("ERROR: Missing required paths:")
-        for path in missing_paths:
-            print(f"  - {path}")
-        print("\nPlease ensure all paths exist before running training.")
-        return False
-    return True
+REAL_TRAIN_IMG  = os.path.join(root, 'cyclegan_images', 'train')
+SYNTH_TRAIN_IMG = os.path.join(root, 'images',          'train')
+TRAIN_MASK_DIR  = os.path.join(root, 'masks',           'train')
+REAL_VAL_IMG    = os.path.join(root, 'cyclegan_images', 'test')
+SYNTH_VAL_IMG   = os.path.join(root, 'images',          'test')
+VAL_MASK_DIR    = os.path.join(root, 'masks',           'test')
+TRAIN_CSV       = os.path.join(root, 'train_labels.csv')
+VAL_CSV         = os.path.join(root, 'test_labels.csv')
 
-def load_label_map(csv_file):
-    """Load label map with error handling"""
+for path, label in [
+    (REAL_TRAIN_IMG,  'cyclegan_images/train'),
+    (SYNTH_TRAIN_IMG, 'images/train'),
+    (TRAIN_MASK_DIR,  'masks/train'),
+    (REAL_VAL_IMG,    'cyclegan_images/test'),
+    (SYNTH_VAL_IMG,   'images/test'),
+    (VAL_MASK_DIR,    'masks/test'),
+    (TRAIN_CSV,       'train_labels.csv'),
+    (VAL_CSV,         'test_labels.csv'),
+]:
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Required path missing — {label}: {path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Hyper-parameters
+# ─────────────────────────────────────────────────────────────────────────────
+
+IMG_SIZE      = 352   # must match CAFormerS18 pretrained input
+FILTERS       = 17
+BATCH_SIZE    = 8
+SEED          = 58800
+EPOCHS_P1     = 10    # Phase 1: regression head warm-up
+EPOCHS_P2     = 50    # Phase 2: full fine-tune (EarlyStopping may stop sooner)
+LOG_ROOT      = './logs'
+os.makedirs(LOG_ROOT, exist_ok=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CSV helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def load_label_map(csv_path: str) -> dict:
+    """
+    Parse a CSV with columns [Filename, logVolume, x, y, z].
+    Returns {Filename: [logVolume, x, y, z]}.
+    """
     label_map = {}
-    try:
-        with open(csv_file, newline='', encoding='utf-8-sig') as f:
-            for row in csv.DictReader(f):
-                try:
-                    label_map[row['Filename']] = [
-                        float(row['logVolume']),
-                        float(row['x']),
-                        float(row['y']),
-                        float(row['z'])
-                    ]
-                except (KeyError, ValueError) as e:
-                    print(f"Warning: Skipping invalid row in CSV: {e}")
-                    continue
-    except FileNotFoundError:
-        print(f"ERROR: CSV file not found: {csv_file}")
-        return None
-    except Exception as e:
-        print(f"ERROR: Failed to read CSV file: {e}")
-        return None
-    
-    print(f"Loaded {len(label_map)} labels from CSV")
+    with open(csv_path, newline='', encoding='utf-8-sig') as f:
+        for row in csv.DictReader(f):
+            try:
+                label_map[row['Filename']] = [
+                    float(row['logVolume']),
+                    float(row['x']),
+                    float(row['y']),
+                    float(row['z']),
+                ]
+            except (KeyError, ValueError) as e:
+                print(f"  Warning: skipping malformed CSV row: {e}")
     return label_map
 
-def get_reg_labels(file_list):
-    """Return an [N,4] array of [vol,x,y,z] for each filename."""
-    regs = []
-    missing_labels = []
-    for fname in file_list:
-        base    = os.path.splitext(fname)[0]        
-        csv_key = f"{base}_labeled.obj"             
-        if label_map is not None and csv_key in label_map:
-            regs.append(label_map[csv_key])
-        else:
-            missing_labels.append(fname)
-    
-    if missing_labels:
-        print(f"Warning: {len(missing_labels)} files missing labels")
-    
-    return np.array(regs, dtype=np.float32)
 
-def filter_labeled(img_dir):
+def build_paths(img_dir: str, mask_dir: str, label_map: dict):
     """
-    Return sorted list of filenames in img_dir whose
-    base+'_labeled.obj' is in label_map.
+    Return parallel lists (img_paths, mask_paths, reg_labels) for all images
+    in img_dir that have a matching CSV label AND a mask file.
+
+    Key lookup order for each image basename:
+      1. base                     (e.g. 'polyp_001')
+      2. base + '_labeled.obj'    (legacy labelling-script format)
+      3. full filename            (e.g. 'polyp_001.jpg')
+
+    Prints a one-line summary: matched vs skipped.
     """
-    out = []
-    if not os.path.exists(img_dir):
-        print(f"ERROR: Image directory does not exist: {img_dir}")
-        return out
-        
-    for fn in os.listdir(img_dir):
-        if not fn.lower().endswith(('.jpg','.png','.jpeg')): 
+    img_paths, mask_paths, reg_labels = [], [], []
+    skipped = 0
+
+    files = sorted(
+        f for f in os.listdir(img_dir)
+        if f.lower().endswith(('.jpg', '.png', '.jpeg'))
+    )
+    for fname in files:
+        base = os.path.splitext(fname)[0]
+
+        # Try multiple key formats
+        label = None
+        for key in (base, base + '_labeled.obj', fname):
+            if key in label_map:
+                label = label_map[key]
+                break
+        if label is None:
+            skipped += 1
             continue
-        base = os.path.splitext(fn)[0]             
-        key  = f"{base}_labeled.obj"              
-        if key in label_keys:
-            out.append(fn)
-    return sorted(out)
 
-def interleave(X1, M1, R1, X2, M2, R2):
-    """
-    Interleave between real and synthetic images
-    """
-    Xc, Mc, Rc = [], [], []
-    n = min(len(X1), len(X2))
-    for i in range(n):
-        Xc.append(X1[i]); Mc.append(M1[i]); Rc.append(R1[i])
-        Xc.append(X2[i]); Mc.append(M2[i]); Rc.append(R2[i])
-    
-    if len(X1) > n:
-        Xc.extend(X1[n:]); Mc.extend(M1[n:]); Rc.extend(R1[n:])
-    if len(X2) > n:
-        Xc.extend(X2[n:]); Mc.extend(M2[n:]); Rc.extend(R2[n:])
-    return np.array(Xc), np.array(Mc), np.array(Rc)
+        mask_path = os.path.join(mask_dir, base + '.png')
+        if not os.path.exists(mask_path):
+            skipped += 1
+            continue
 
-def compute_regression_statistics(reg_data):
-    """Compute statistics for regression data normalization"""
-    stats = {
-        'min': np.min(reg_data, axis=0),
-        'max': np.max(reg_data, axis=0),
-        'mean': np.mean(reg_data, axis=0),
-        'std': np.std(reg_data, axis=0),
-        'range': np.max(reg_data, axis=0) - np.min(reg_data, axis=0)
-    }
-    
-    print("Regression data statistics:")
-    print(f"  Volume: min={stats['min'][0]:.2f}, max={stats['max'][0]:.2f}, mean={stats['mean'][0]:.2f}")
-    print(f"  X-dim:  min={stats['min'][1]:.2f}, max={stats['max'][1]:.2f}, mean={stats['mean'][1]:.2f}")
-    print(f"  Y-dim:  min={stats['min'][2]:.2f}, max={stats['max'][2]:.2f}, mean={stats['mean'][2]:.2f}")
-    print(f"  Z-dim:  min={stats['min'][3]:.2f}, max={stats['max'][3]:.2f}, mean={stats['mean'][3]:.2f}")
-    
-    return stats
+        img_paths.append(os.path.join(img_dir, fname))
+        mask_paths.append(mask_path)
+        reg_labels.append(label)
 
-def create_minmax_normalized_mse_loss(reg_stats):
-    """
-    Create MSE loss normalized using min-max scaling from training data statistics
-    """
-    reg_min, reg_max = reg_stats['min'], reg_stats['max']
-    reg_range = reg_max - reg_min + 1e-8
+    print(f"  {os.path.relpath(img_dir, root)}: "
+          f"{len(img_paths)} matched, {skipped} skipped")
+    return img_paths, mask_paths, reg_labels
 
-    def minmax_normalized_mse_loss(y_true, y_pred):
-        y_true_norm = (y_true - reg_min) / reg_range
-        y_pred_norm = (y_pred - reg_min) / reg_range
-        
-        return tf.keras.losses.mean_squared_error(y_true_norm, y_pred_norm)
-    
-    return minmax_normalized_mse_loss
 
-def augment_batch(X, M, R):
-    """
-    Apply albumentations to images & masks
-    Leave regression labels unchanged.
-    """
-    Xa, Ma, Ra = [], [], []
-    for img, msk, reg in zip(X, M, R):
-        try:
-            a = aug(image=(img*255).astype(np.uint8),
-                    mask =(msk*255).astype(np.uint8))
-            Xa.append(a['image'] / 255.0)
-            Ma.append(a['mask']  / 255.0)
-            Ra.append(reg)
-        except Exception as e:
-            print(f"Warning: Augmentation failed for sample: {e}")
-            # Use original data if augmentation fails
-            Xa.append(img)
-            Ma.append(msk)
-            Ra.append(reg)
-    return ( np.array(Xa, dtype=np.float32),
-             np.expand_dims(np.array(Ma, dtype=np.float32), -1),
-             np.array(Ra, dtype=np.float32) )
+# ─────────────────────────────────────────────────────────────────────────────
+# Load labels + build path lists
+# ─────────────────────────────────────────────────────────────────────────────
 
-def freeze_layers_except_regression(model):
-    """Freeze all layers except regression output"""
-    for layer in model.layers:
-        if 'regression_output' in layer.name:
-            layer.trainable = True
-        else:
-            layer.trainable = False
+print("Loading label maps...")
+train_lm = load_label_map(TRAIN_CSV)
+val_lm   = load_label_map(VAL_CSV)
+print(f"  train_labels: {len(train_lm)} entries")
+print(f"  val_labels  : {len(val_lm)} entries")
 
-def unfreeze_all_layers(model):
-    """Unfreeze all layers"""
-    for layer in model.layers:
+print("Building path lists...")
+ri_t, rm_t, rr_t = build_paths(REAL_TRAIN_IMG,  TRAIN_MASK_DIR, train_lm)
+si_t, sm_t, sr_t = build_paths(SYNTH_TRAIN_IMG, TRAIN_MASK_DIR, train_lm)
+ri_v, rm_v, rr_v = build_paths(REAL_VAL_IMG,    VAL_MASK_DIR,   val_lm)
+si_v, sm_v, sr_v = build_paths(SYNTH_VAL_IMG,   VAL_MASK_DIR,   val_lm)
+
+train_imgs  = ri_t  + si_t
+train_masks = rm_t  + sm_t
+train_regs  = rr_t  + sr_t
+val_imgs    = ri_v  + si_v
+val_masks   = rm_v  + sm_v
+val_regs    = rr_v  + sr_v
+
+if not train_imgs:
+    raise RuntimeError(
+        "No training samples found after matching CSV keys to image files.\n"
+        "Check that CSV 'Filename' values match image basenames (or base + '_labeled.obj')."
+    )
+if not val_imgs:
+    raise RuntimeError("No validation samples found.")
+
+print(f"\nDataset size: {len(train_imgs)} train  |  {len(val_imgs)} val")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Regression statistics (computed from training labels only — no leakage)
+# ─────────────────────────────────────────────────────────────────────────────
+
+train_reg_arr = np.array(train_regs, dtype=np.float32)
+reg_stats = {
+    'min':   train_reg_arr.min(axis=0),
+    'max':   train_reg_arr.max(axis=0),
+    'mean':  train_reg_arr.mean(axis=0),
+    'std':   train_reg_arr.std(axis=0),
+    'range': train_reg_arr.max(axis=0) - train_reg_arr.min(axis=0),
+}
+
+print("\nRegression statistics (training set):")
+for i, name in enumerate(['logVolume', 'x', 'y', 'z']):
+    print(f"  {name:12s}: "
+          f"min={reg_stats['min'][i]:.3f}  "
+          f"max={reg_stats['max'][i]:.3f}  "
+          f"mean={reg_stats['mean'][i]:.3f}  "
+          f"std={reg_stats['std'][i]:.3f}")
+
+pickle.dump(reg_stats, open('regression_stats.pkl', 'wb'))
+print("Saved regression_stats.pkl")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Loss
+# ─────────────────────────────────────────────────────────────────────────────
+
+mse_loss = normalized_mse_loss(reg_stats)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# tf.data datasets
+# ─────────────────────────────────────────────────────────────────────────────
+
+print("\nBuilding tf.data datasets...")
+train_ds = build_dataset(
+    train_imgs, train_masks, train_regs,
+    img_size=IMG_SIZE, batch_size=BATCH_SIZE,
+    training=True, seed=SEED,
+    # Set cache=True if your dataset fits in system RAM for faster epochs.
+    # Set cache='/tmp/alphapolyp_cache' to cache to disk instead.
+    cache=False,
+)
+val_ds = build_dataset(
+    val_imgs, val_masks, val_regs,
+    img_size=IMG_SIZE, batch_size=BATCH_SIZE,
+    training=False, seed=SEED,
+    cache=False,
+)
+print("Datasets ready.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Model
+# ─────────────────────────────────────────────────────────────────────────────
+
+model = create_model(
+    img_height=IMG_SIZE, img_width=IMG_SIZE, input_channels=3,
+    out_classes=1, starting_filters=FILTERS,
+    bias=reg_stats['mean'],
+)
+print(f"\nModel: {model.count_params():,} parameters")
+
+if os.path.exists(args.pretrained):
+    model.load_weights(args.pretrained, by_name=True, skip_mismatch=True)
+    print(f"Loaded pretrained weights: {args.pretrained}")
+else:
+    print(f"No pretrained checkpoint found at '{args.pretrained}' — training from scratch.")
+
+
+def _freeze_except_regression(m):
+    for layer in m.layers:
+        layer.trainable = ('regression_output' in layer.name)
+
+def _unfreeze_all(m):
+    for layer in m.layers:
         layer.trainable = True
 
 
-"""
-How many epochs for each phase 
-epochs_phase1  for regression head only (segmentation head is frozen)
-epochs_phase2  to fine-tune all (segmentation head is unfrozen)
-"""
-
-epochs_phase1  = 10  
-epochs_phase2  = 15  
-
-"""
-This is the path to the pretrained 
-RAPUNet checkpoint (segmentation only)
-"""
-
-pretrained_ckpt = 'rapunet_pretrained.h5'
-
-log_root       = './logs'
-os.makedirs(log_root, exist_ok=True)
-
-label_map = load_label_map(csv_labels)
-if label_map is None:
-    exit(1)
-
-label_keys = set(label_map.keys())
-
-if not validate_paths():
-    exit(1)
-
-real_files  = filter_labeled(real_img_dir)
-synth_files = filter_labeled(synth_img_dir)
-
-if not real_files:
-    print(f"ERROR: No labeled real files found in {real_img_dir}")
-    exit(1)
-if not synth_files:
-    print(f"ERROR: No labeled synthetic files found in {synth_img_dir}")
-    exit(1)
-
-print(f"Found {len(real_files)} real files and {len(synth_files)} synthetic files")
-
-try:
-    X_real,  Y_real_mask  = load_images_masks_from_drive(real_img_dir,  real_mask_dir,  img_size)
-    X_synth, Y_synth_mask = load_images_masks_from_drive(synth_img_dir, synth_mask_dir, img_size)
-except Exception as e:
-    print(f"ERROR: Failed to load images/masks: {e}")
-    exit(1)
-
-Y_real_reg  = get_reg_labels(real_files)
-Y_synth_reg = get_reg_labels(synth_files)
-
-if len(X_real) != len(Y_real_reg):
-    print(f"ERROR: Mismatch between real images ({len(X_real)}) and regression labels ({len(Y_real_reg)})")
-    exit(1)
-if len(X_synth) != len(Y_synth_reg):
-    print(f"ERROR: Mismatch between synthetic images ({len(X_synth)}) and regression labels ({len(Y_synth_reg)})")
-    exit(1)
-
-X_all, Y_all_mask, Y_all_reg = interleave(
-    X_real,  Y_real_mask,  Y_real_reg,
-    X_synth, Y_synth_mask, Y_synth_reg
-)
-
-if len(X_all) < 10:
-    print(f"ERROR: Insufficient data ({len(X_all)} samples). Need at least 10 samples.")
-    exit(1)
-
-x_train, x_val, y_train_mask, y_val_mask, y_train_reg, y_val_reg = \
-    train_test_split(
-        X_all, Y_all_mask, Y_all_reg,
-        test_size=0.1, shuffle=True, random_state=seed
-    )
-
-print(f"Training set: {len(x_train)} samples, Validation set: {len(x_val)} samples")
-
-reg_stats = compute_regression_statistics(y_train_reg)
-
-# Save regression statistics for prediction
-pickle.dump(reg_stats, open('regression_stats.pkl', 'wb'))
-print("Saved regression statistics to regression_stats.pkl")
-
-normalized_regression_loss = create_minmax_normalized_mse_loss(reg_stats)
-
-aug = albu.Compose([
-    albu.HorizontalFlip(),
-    albu.VerticalFlip(),
-    albu.ColorJitter(brightness=(0.6,1.6),contrast=0.2,saturation=0.1,hue=0.01,always_apply=True),
-    albu.Affine(scale=(0.5,1.5),translate_percent=(-0.125,0.125),rotate=(-180,180),shear=(-22.5,22),always_apply=True),
-])
-
-try:
-    model = create_model(out_classes=1, starting_filters=filters, reg_mean_norm=reg_stats['mean'])
-    print("Model created successfully")
-except Exception as e:
-    print(f"ERROR: Failed to create model: {e}")
-    exit(1)
-
-if os.path.exists(pretrained_ckpt):
-    try:
-        model.load_weights(pretrained_ckpt, by_name=True, skip_mismatch=True)
-        print('Loaded pretrained RAPUNet weights.')
-    except Exception as e:
-        print(f"Warning: Failed to load pretrained weights: {e}")
+# ─────────────────────────────────────────────────────────────────────────────
+# Callbacks — separate sets for the two phases
+# ─────────────────────────────────────────────────────────────────────────────
 
 run_id = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-callbacks = [
-    CSVLogger    (f'{log_root}/train_{run_id}.csv'),
-    TensorBoard  (log_dir=f'{log_root}/tb_{run_id}'),
-    ModelCheckpoint('alphapolyp_optimized_model.h5',
-                    monitor='val_segmentation_output_loss',
-                    save_best_only=True, verbose=1),
-    ReduceLROnPlateau(monitor='val_segmentation_output_loss',
-                      factor=0.5, patience=8, verbose=1)
+
+def _lr_log(epoch, logs):
+    try:
+        logs['lr'] = float(model.optimizer.learning_rate)
+    except Exception:
+        pass
+
+phase1_callbacks = [
+    CSVLogger(f'{LOG_ROOT}/phase1_{run_id}.csv'),
+    TensorBoard(log_dir=f'{LOG_ROOT}/tb_phase1_{run_id}'),
+    ModelCheckpoint(
+        f'{LOG_ROOT}/phase1_best_reg_{run_id}.weights.h5',
+        monitor='val_regression_output_loss', save_best_only=True,
+        save_weights_only=True, verbose=1,
+    ),
+    ReduceLROnPlateau(
+        monitor='val_regression_output_loss', factor=0.5,
+        patience=4, min_lr=1e-7, verbose=1,
+    ),
+    TerminateOnNaN(),
+    BackupAndRestore(backup_dir=os.path.join(LOG_ROOT, 'backup_phase1')),
+    LambdaCallback(on_epoch_end=_lr_log),
 ]
 
-""" 
-PHASE 1: TRAIN REGRESSION HEAD ONLY 
-Freeze everything except regression head
-"""
-freeze_layers_except_regression(model)
+phase2_callbacks = [
+    CSVLogger(f'{LOG_ROOT}/phase2_{run_id}.csv'),
+    TensorBoard(log_dir=f'{LOG_ROOT}/tb_phase2_{run_id}'),
+    ModelCheckpoint(
+        f'{LOG_ROOT}/phase2_best_reg_{run_id}.weights.h5',
+        monitor='val_regression_output_loss', save_best_only=True,
+        save_weights_only=True, verbose=1,
+    ),
+    ModelCheckpoint(
+        f'{LOG_ROOT}/phase2_best_seg_{run_id}.weights.h5',
+        monitor='val_segmentation_output_loss', mode='min',
+        save_best_only=True, save_weights_only=True, verbose=1,
+    ),
+    ReduceLROnPlateau(
+        monitor='val_loss', factor=0.5, patience=6,
+        cooldown=2, min_lr=1e-7, verbose=1,
+    ),
+    EarlyStopping(
+        monitor='val_loss', patience=16,
+        restore_best_weights=True, verbose=1,
+    ),
+    TerminateOnNaN(),
+    BackupAndRestore(backup_dir=os.path.join(LOG_ROOT, 'backup_phase2')),
+    LambdaCallback(on_epoch_end=_lr_log),
+]
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 1 — warm up regression head only (segmentation frozen)
+# ─────────────────────────────────────────────────────────────────────────────
+
+print(f"\n{'='*60}")
+print(f" Phase 1 — {EPOCHS_P1} epochs  (regression head only)")
+print(f"{'='*60}")
+
+_freeze_except_regression(model)
 model.compile(
-    optimizer=AdamW(1e-4, weight_decay=1e-6),
-    loss={'segmentation_output': dice_metric_loss,
-          'regression_output'  : normalized_regression_loss},  # Use normalized loss
-    loss_weights={'segmentation_output':1.0,
-                  'regression_output'  :1.0}
+    optimizer=AdamW(learning_rate=1e-4, weight_decay=1e-6),
+    loss={
+        'segmentation_output': dice_metric_loss,
+        'regression_output':   mse_loss,
+    },
+    loss_weights={
+        'segmentation_output': 0.0,   # frozen → no gradients needed
+        'regression_output':   1.0,
+    },
+)
+model.fit(
+    train_ds,
+    validation_data=val_ds,
+    epochs=EPOCHS_P1,
+    callbacks=phase1_callbacks,
 )
 
-print('Phase1: training regression head only')
-print('Using normalized regression loss to balance with segmentation loss')
-for epoch in range(epochs_phase1):
-    try:
-        Xa, Ma, Ra = augment_batch(x_train, y_train_mask, y_train_reg)
-        model.fit(Xa,
-                  {'segmentation_output': Ma,
-                   'regression_output'  : Ra},
-                  validation_data=(x_val,
-                                   {'segmentation_output': y_val_mask,
-                                    'regression_output'  : y_val_reg}),
-                  epochs=1, batch_size=batch_size,
-                  callbacks=callbacks, verbose=1)
-        gc.collect()
-    except Exception as e:
-        print(f"ERROR: Training failed at epoch {epoch}: {e}")
-        break
 
-"""
-PHASE 2: FINE-TUNE ENTIRE NETWORK 
-Unfreeze all layers
-"""
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 2 — fine-tune all layers
+# ─────────────────────────────────────────────────────────────────────────────
 
-unfreeze_all_layers(model)
+print(f"\n{'='*60}")
+print(f" Phase 2 — up to {EPOCHS_P2} epochs  (all layers, EarlyStopping active)")
+print(f"{'='*60}")
 
+_unfreeze_all(model)
 model.compile(
-    optimizer=AdamW(1e-5, weight_decay=1e-6),
-    loss={'segmentation_output': dice_metric_loss,
-          'regression_output'  : normalized_regression_loss},  
-    loss_weights={'segmentation_output':1.0,
-                  'regression_output'  :1.0}
+    optimizer=AdamW(learning_rate=1e-5, weight_decay=1e-6),
+    loss={
+        'segmentation_output': dice_metric_loss,
+        'regression_output':   mse_loss,
+    },
+    loss_weights={
+        'segmentation_output': 1.0,
+        'regression_output':   1.0,
+    },
+)
+model.fit(
+    train_ds,
+    validation_data=val_ds,
+    epochs=EPOCHS_P2,
+    callbacks=phase2_callbacks,
 )
 
-print('Phase2: fine-tuning all layers')
-print('Using normalized regression loss to balance with segmentation loss')
-for epoch in range(epochs_phase2):
-    try:
-        Xa, Ma, Ra = augment_batch(x_train, y_train_mask, y_train_reg)
-        model.fit(Xa,
-                  {'segmentation_output': Ma,
-                   'regression_output'  : Ra},
-                  validation_data=(x_val,
-                                   {'segmentation_output': y_val_mask,
-                                    'regression_output'  : y_val_reg}),
-                  epochs=1, batch_size=batch_size,
-                  callbacks=callbacks, verbose=1)
-        gc.collect()
-    except Exception as e:
-        print(f"ERROR: Training failed at epoch {epoch}: {e}")
-        break
 
-print('Training complete — alphapolyp_optimized_model.h5 saved.')
-print('Note: Regression outputs are in original scale. Use reg_stats for denormalization if needed.')
+# ─────────────────────────────────────────────────────────────────────────────
+# Save final weights (EarlyStopping has already restored best weights)
+# ─────────────────────────────────────────────────────────────────────────────
+
+final_ckpt = os.path.join(LOG_ROOT, f'final_best_{run_id}.weights.h5')
+model.save_weights(final_ckpt)
+print(f"\nFinal best weights saved: {final_ckpt}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Generate training report
+# ─────────────────────────────────────────────────────────────────────────────
+
+report_path = generate_report(
+    run_id        = run_id,
+    log_root      = LOG_ROOT,
+    reg_stats     = reg_stats,
+    n_train       = len(train_imgs),
+    n_val         = len(val_imgs),
+    n_real_train  = len(ri_t),
+    n_synth_train = len(si_t),
+    n_real_val    = len(ri_v),
+    n_synth_val   = len(si_v),
+    img_size      = IMG_SIZE,
+    batch_size    = BATCH_SIZE,
+    filters       = FILTERS,
+    epochs_p1     = EPOCHS_P1,
+    epochs_p2     = EPOCHS_P2,
+    n_params      = model.count_params(),
+    pretrained    = args.pretrained,
+    pretrained_loaded = os.path.exists(args.pretrained),
+    start_time    = START_TIME,
+)
+
+print(f"\n{'='*60}")
+print(f" Training complete.")
+print(f"{'='*60}")
+print(f"  Report           : {report_path}")
+print(f"  Final weights    : {final_ckpt}")
+print(f"  Regression stats : regression_stats.pkl")
+print(f"  TensorBoard      : tensorboard --logdir {LOG_ROOT}")

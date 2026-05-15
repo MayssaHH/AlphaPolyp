@@ -56,11 +56,19 @@ def denormalize_regression(prediction, reg_stats):
     reg_range = reg_max - reg_min
     return prediction * reg_range + reg_min
 
-# Load model
-model = tf.keras.models.load_model(
-    model_path,
-    custom_objects={'dice_metric_loss': dice_metric_loss}
-)
+# Load model — weights-only (.weights.h5) or full saved model (.h5)
+from model_architecture.model import create_model
+if model_path.endswith('.weights.h5'):
+    model = create_model(img_height=img_size, img_width=img_size, input_channels=3,
+                         out_classes=1, starting_filters=17)
+    model.load_weights(model_path)
+    print(f"Loaded weights from {model_path}")
+else:
+    model = tf.keras.models.load_model(
+        model_path,
+        custom_objects={'dice_metric_loss': dice_metric_loss}
+    )
+    print(f"Loaded full model from {model_path}")
 
 # Load regression statistics
 reg_stats = load_regression_stats(stats_path)
@@ -75,7 +83,8 @@ seg_pred, reg_pred = model.predict(x_real, batch_size=batch_size, verbose=1)
 # Denormalize regression predictions if stats are available
 if reg_stats is not None:
     reg_pred = denormalize_regression(reg_pred, reg_stats)
-    reg_pred[0,0] = np.expm1(reg_pred[0,0])
+    # Invert log1p transform on the volume column for every sample
+    reg_pred[:, 0] = np.expm1(reg_pred[:, 0])
     print("Regression predictions denormalized to original scale")
 else:
     print("Regression predictions in normalized scale")

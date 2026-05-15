@@ -123,12 +123,19 @@ def main():
         'dice_metric_loss': dice_metric_loss
     }
     
-    # Load model
+    # Build model architecture then load weights.
+    # Supports both:
+    #   *.weights.h5  — weights-only checkpoint (produced by train.py)
+    #   *.h5          — full saved model (legacy)
+    model = create_model(img_height=352, img_width=352, input_channels=3,
+                         out_classes=1, starting_filters=17)
     if not os.path.exists(args.model):
-        print(f"Model file {args.model} not found. Creating new model...")
-        model = create_model(out_classes=1, starting_filters=17)
+        print(f"Warning: model file not found at {args.model}. Using random weights.")
+    elif args.model.endswith('.weights.h5'):
+        print(f"Loading weights from {args.model}")
+        model.load_weights(args.model)
     else:
-        print(f"Loading model from {args.model}")
+        print(f"Loading full model from {args.model}")
         with tf.keras.utils.custom_object_scope(custom_objects):
             model = load_model(args.model)
     
