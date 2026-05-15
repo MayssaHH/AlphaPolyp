@@ -40,6 +40,9 @@ apt-get install -y -qq fuse3 unzip curl wget git
 # ── 2. Python dependencies ────────────────────────────────────────────────────
 echo "[2/5] Installing Python dependencies..."
 pip install --quiet --upgrade pip
+# blinker 1.4 ships as a distutils package on some base images; force-upgrade it
+# so Flask's blinker>=1.6.2 requirement resolves cleanly.
+pip install --quiet --ignore-installed blinker
 pip install --quiet \
     "numpy>=1.22,<1.24" \
     "opencv-python-headless>=4.5.0" \
