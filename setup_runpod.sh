@@ -20,7 +20,6 @@ set -euo pipefail
 WORKSPACE=/workspace
 REPO_DIR=${WORKSPACE}/AlphaPolyp
 DATA_DIR=${WORKSPACE}/data
-GDRIVE_MOUNT=${WORKSPACE}/gdrive
 
 # Google Drive folder name (inside the shared drive)
 # The public link is:
@@ -92,39 +91,23 @@ else
     echo "  rclone remote '${GDRIVE_REMOTE}' already configured — skipping."
 fi
 
-# ── 5. Mount Google Drive + create data symlinks ──────────────────────────────
-echo "[5/5] Mounting Google Drive and linking data..."
+# ── 5. Copy dataset from Google Drive to network volume ───────────────────────
+echo "[5/5] Copying dataset from Google Drive to ${DATA_DIR}..."
+echo "  (FUSE mount is not used — data is copied directly for reliability)"
 
-mkdir -p "${GDRIVE_MOUNT}"
+mkdir -p "${DATA_DIR}"
 
-# Mount in background (read-only, no-modtime for speed)
-if ! mountpoint -q "${GDRIVE_MOUNT}"; then
-    rclone mount "${GDRIVE_REMOTE}:" "${GDRIVE_MOUNT}" \
-        --vfs-cache-mode full \
-        --vfs-cache-max-size 20G \
-        --vfs-read-chunk-size 32M \
-        --transfers 8 \
-        --dir-cache-time 48h \
-        --read-only \
-        --daemon
-    echo "  Google Drive mounted at ${GDRIVE_MOUNT}"
-    sleep 3   # give FUSE time to settle
+# Skip if the key subdirectories already exist (re-run safe)
+if [ -d "${DATA_DIR}/images" ] && [ -d "${DATA_DIR}/masks" ]; then
+    echo "  Dataset already present at ${DATA_DIR} — skipping copy."
 else
-    echo "  ${GDRIVE_MOUNT} already mounted."
+    rclone copy "${GDRIVE_REMOTE}:${GDRIVE_SUBFOLDER}" "${DATA_DIR}" \
+        --progress \
+        --transfers 8 \
+        --checkers 16 \
+        --drive-chunk-size 64M
+    echo "  Dataset copied to ${DATA_DIR}"
 fi
-
-# Link the dataset subtree into /workspace/data/
-SRC="${GDRIVE_MOUNT}/${GDRIVE_SUBFOLDER}"
-
-if [ ! -d "${SRC}" ]; then
-    echo "ERROR: Could not find data at ${SRC}"
-    echo "  Check that GDRIVE_SUBFOLDER matches the folder structure on your Drive."
-    echo "  Run: rclone ls ${GDRIVE_REMOTE}: | head -30"
-    exit 1
-fi
-
-ln -sfn "${SRC}" "${DATA_DIR}"
-echo "  Dataset linked: ${DATA_DIR} -> ${SRC}"
 
 # ── Verify repo is present ────────────────────────────────────────────────────
 if [ ! -d "${REPO_DIR}" ]; then
