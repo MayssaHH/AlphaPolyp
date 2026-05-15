@@ -25,7 +25,7 @@ DATA_DIR=${WORKSPACE}/data
 # The public link is:
 # https://drive.google.com/drive/folders/1NARp2kYtM5-aD8gHWHypCNpK98rDFR7-
 GDRIVE_REMOTE="gdrive"
-GDRIVE_SUBFOLDER="AlphaPolyp_data/extracted_folder/syth-colon"
+GDRIVE_SUBFOLDER="extracted_folder/synth-colon"
 
 echo "============================================================"
 echo "  AlphaPolyp RunPod Setup"
