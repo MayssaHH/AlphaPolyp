@@ -43,7 +43,7 @@ pip install --quiet --upgrade pip
 pip install --quiet \
     "numpy>=1.22,<1.24" \
     "opencv-python-headless>=4.5.0" \
-    "tensorflow==2.12.0" \
+    "tensorflow==2.13.0" \
     "tensorflow-addons==0.22.0" \
     "albumentations==1.3.0" \
     "scikit-learn==1.3.0" \
